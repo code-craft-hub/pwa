@@ -1,9 +1,7 @@
 import { Inter } from "next/font/google";
 import "./globals.css";
-// import { cn } from "@/lib/utils"
-// import { Toaster } from "@/components/ui/toaster"
-// import { ThemeProvider } from "@/components/ThemeProvider"
 import { Viewport } from "next";
+import { NotificationBell } from "@/components/NotificationBell";
 
 const defaultUrl = process.env.VERCEL_URL
   ? `https://${process.env.VERCEL_URL}`
@@ -227,8 +225,7 @@ export default function RootLayout({
           disableTransitionOnChange
         > */}
         {children}
-        {/* <Toaster />
-        </ThemeProvider> */}
+        <NotificationBell />
       </body>
     </html>
   );

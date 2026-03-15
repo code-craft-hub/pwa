@@ -1,0 +1,208 @@
+/**
+ * Editor global styles.
+ * Import this file once in your app layout or _app.tsx:
+ *   import '@/components/editor/theme/editor-styles.css';
+ *
+ * These styles handle the cases Tailwind cannot cover via class names
+ * (e.g., pseudo-elements, contenteditable, prism token coloring).
+ */
+
+/* ─── Contenteditable root ──────────────────────────────────────────────────── */
+.editor-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  word-break: break-word;
+}
+
+.editor-root:focus {
+  outline: none;
+}
+
+/* ─── Placeholder ───────────────────────────────────────────────────────────── */
+.editor-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 12px 16px;
+  color: hsl(var(--muted-foreground));
+  pointer-events: none;
+  user-select: none;
+  font-size: inherit;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* ─── Code block language label ─────────────────────────────────────────────── */
+.editor-code-block::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: hsl(var(--muted-foreground));
+  opacity: 0.7;
+}
+
+/* ─── Code block line numbers ───────────────────────────────────────────────── */
+.editor-code-block .editor-tokenize-line {
+  position: relative;
+}
+
+/* ─── Check list items ──────────────────────────────────────────────────────── */
+.editor-listitem-unchecked,
+.editor-listitem-checked {
+  list-style-type: none;
+  position: relative;
+  padding-left: 1.75rem;
+}
+
+.editor-listitem-unchecked::before,
+.editor-listitem-checked::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.3em;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid hsl(var(--border));
+  border-radius: 3px;
+  cursor: pointer;
+  background-color: hsl(var(--background));
+  transition: all 0.15s ease;
+}
+
+.editor-listitem-checked::before {
+  background-color: hsl(var(--primary));
+  border-color: hsl(var(--primary));
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='white'%3E%3Cpath d='M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 11.44l6.72-6.72a.75.75 0 0 1 1.06 0z'/%3E%3C/svg%3E");
+  background-size: 0.75rem;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* ─── Editor link ───────────────────────────────────────────────────────────── */
+.editor-link:hover {
+  text-decoration-style: wavy;
+}
+
+/* ─── Selected node highlight ───────────────────────────────────────────────── */
+.editor-image.focused,
+.editor-image.focused:hover {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+/* ─── Horizontal rule ───────────────────────────────────────────────────────── */
+.editor-hr {
+  display: block;
+  border: none;
+  border-top: 2px solid hsl(var(--border));
+  margin: 1.5rem 0;
+  cursor: default;
+}
+
+.editor-hr.selected {
+  border-top-color: hsl(var(--primary));
+}
+
+/* ─── Image resize handles ──────────────────────────────────────────────────── */
+.image-resizer {
+  display: flex;
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background-color: hsl(var(--primary));
+  border: 1.5px solid white;
+  border-radius: 2px;
+  cursor: nwse-resize;
+}
+
+.image-resizer.image-resizer-ne {
+  top: -4px; right: -4px; cursor: nesw-resize;
+}
+.image-resizer.image-resizer-nw {
+  top: -4px; left: -4px; cursor: nwse-resize;
+}
+.image-resizer.image-resizer-se {
+  bottom: -4px; right: -4px; cursor: nwse-resize;
+}
+.image-resizer.image-resizer-sw {
+  bottom: -4px; left: -4px; cursor: nesw-resize;
+}
+
+/* ─── Draggable block handle ────────────────────────────────────────────────── */
+.draggable-block-menu {
+  border-radius: 4px;
+  padding: 2px;
+  cursor: grab;
+  opacity: 0;
+  position: absolute;
+  left: 0;
+  top: 0;
+  will-change: transform;
+  transition: opacity 0.15s ease;
+  background-color: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+.draggable-block-menu:active {
+  cursor: grabbing;
+}
+
+.draggable-block-menu:hover,
+.draggable-block-target-line:hover ~ .draggable-block-menu {
+  opacity: 1;
+}
+
+.draggable-block-target-line {
+  pointer-events: none;
+  background: hsl(var(--primary));
+  height: 2px;
+  position: absolute;
+  left: 0; right: 0;
+  opacity: 0;
+  will-change: transform;
+  border-radius: 4px;
+}
+
+/* ─── Table selection ───────────────────────────────────────────────────────── */
+.editor-table-cell.selected {
+  caret-color: transparent;
+  background-color: hsl(var(--primary) / 0.15);
+}
+
+/* ─── Toolbar button active state ───────────────────────────────────────────── */
+.toolbar-btn-active {
+  background-color: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+}
+
+/* ─── Floating toolbar animation ────────────────────────────────────────────── */
+.floating-toolbar {
+  animation: floating-toolbar-in 0.15s ease;
+}
+
+@keyframes floating-toolbar-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ─── Nested list indent ────────────────────────────────────────────────────── */
+.editor-nested-listitem {
+  list-style-type: none;
+}
+
+/* ─── Block quote ───────────────────────────────────────────────────────────── */
+.editor-quote {
+  margin: 0;
+}
