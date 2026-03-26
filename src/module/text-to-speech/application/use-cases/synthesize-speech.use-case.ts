@@ -7,12 +7,13 @@ export class SynthesizeSpeechUseCase {
 
   execute(
     request: SpeechRequest,
-    onStateChange: (state: SpeechState) => void
+    onStateChange: (state: SpeechState) => void,
+    onWordBoundary?: (charIndex: number, charLength: number) => void
   ): Promise<void> {
     if (!request.text.trim()) {
       onStateChange({ status: 'idle' });
       return Promise.resolve();
     }
-    return this.tts.speak(request, onStateChange);
+    return this.tts.speak(request, onStateChange, onWordBoundary);
   }
 }

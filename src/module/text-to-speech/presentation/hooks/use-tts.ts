@@ -5,24 +5,24 @@ import type { Voice } from '../../domain/entities/voice.entity';
 import type { SpeechStatus } from '../../domain/entities/speech-state.entity';
 import { GetVoicesUseCase } from '../../application/use-cases/get-voices.use-case';
 import { SynthesizeSpeechUseCase } from '../../application/use-cases/synthesize-speech.use-case';
-import { StreamElementsVoiceCatalogAdapter } from '../../infrastructure/stream-elements/stream-elements-voice-catalog.adapter';
-import { StreamElementsTTSAdapter } from '../../infrastructure/stream-elements/stream-elements-tts.adapter';
 import { WebSpeechVoiceCatalogAdapter } from '../../infrastructure/web-speech/web-speech-voice-catalog.adapter';
 import { WebSpeechTTSAdapter } from '../../infrastructure/web-speech/web-speech-tts.adapter';
 
-export interface TTSProgress {
-  current: number;
-  total: number;
-  currentText: string;
+export interface WordRange {
+  charIndex: number;
+  charLength: number;
 }
 
 export interface UseTTSReturn {
   isOnline: boolean;
+  /** true when the browser has cloud voices available (Chrome / Edge) */
+  hasCloudVoices: boolean;
   voices: Voice[];
   selectedVoice: Voice | null;
   setSelectedVoice: (voice: Voice) => void;
   status: SpeechStatus;
-  progress: TTSProgress | null;
+  /** Current word position in the source text — null when idle */
+  wordRange: WordRange | null;
   error: string | null;
   rate: number;
   setRate: (rate: number) => void;
@@ -38,131 +38,108 @@ export function useTTS(): UseTTSReturn {
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
-  const [voices, setVoices] = useState<Voice[]>([]);
+  const [voices, setVoices]               = useState<Voice[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<Voice | null>(null);
-  const [status, setStatus] = useState<SpeechStatus>('idle');
-  const [progress, setProgress] = useState<TTSProgress | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [rate, setRate] = useState(1.0);
-  const [volume, setVolume] = useState(1.0);
+  const [status, setStatus]               = useState<SpeechStatus>('idle');
+  const [wordRange, setWordRange]         = useState<WordRange | null>(null);
+  const [error, setError]                 = useState<string | null>(null);
+  const [rate, setRate]                   = useState(1.0);
+  const [volume, setVolume]               = useState(1.0);
 
-  // Keep stable adapter instances across renders
-  const onlineTTS  = useRef(new StreamElementsTTSAdapter());
-  const offlineTTS = useRef(new WebSpeechTTSAdapter());
+  const ttsAdapter = useRef(new WebSpeechTTSAdapter());
 
-  // ── Online / offline detection ───────────────────────────────────────────
+  // ── Online / offline ──────────────────────────────────────────────────
   useEffect(() => {
-    const handleOnline  = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online',  handleOnline);
-    window.addEventListener('offline', handleOffline);
+    const up   = () => setIsOnline(true);
+    const down = () => setIsOnline(false);
+    window.addEventListener('online',  up);
+    window.addEventListener('offline', down);
     return () => {
-      window.removeEventListener('online',  handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('online',  up);
+      window.removeEventListener('offline', down);
     };
   }, []);
 
-  // ── Voice loading ────────────────────────────────────────────────────────
+  // ── Voice loading ─────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
-    const loadVoices = async () => {
-      const useCase = new GetVoicesUseCase(
-        new StreamElementsVoiceCatalogAdapter(),
-        new WebSpeechVoiceCatalogAdapter()
-      );
-      const loaded = await useCase.execute(isOnline);
+    const load = async () => {
+      const useCase = new GetVoicesUseCase(new WebSpeechVoiceCatalogAdapter());
+      const loaded  = await useCase.execute(isOnline);
       if (cancelled) return;
+
       setVoices(loaded);
-      // Auto-select Brian (online) or first available voice
-      if (!selectedVoice || selectedVoice.provider !== (isOnline ? 'stream-elements' : 'web-speech')) {
-        const preferred = loaded.find((v) => v.id === 'Brian') ?? loaded[0] ?? null;
-        setSelectedVoice(preferred);
-      }
+      setSelectedVoice((prev) => {
+        if (prev && loaded.find((v) => v.id === prev.id)) return prev;
+        // Pick first cloud voice (Google / Microsoft) if available, else first local
+        return loaded[0] ?? null;
+      });
     };
 
-    loadVoices();
+    load();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOnline]);
 
-  // ── Stop ongoing speech when going offline ───────────────────────────────
+  // Stop and clear word highlight when going offline mid-read
   useEffect(() => {
     if (!isOnline && (status === 'playing' || status === 'loading')) {
-      onlineTTS.current.stop();
+      ttsAdapter.current.stop();
       setStatus('idle');
-      setProgress(null);
+      setWordRange(null);
     }
   }, [isOnline, status]);
 
-  // ── Speak ────────────────────────────────────────────────────────────────
+  const hasCloudVoices = voices.some((v) => !v.isLocal);
+
+  // ── Speak ─────────────────────────────────────────────────────────────
   const speak = useCallback(async (text: string) => {
     if (!selectedVoice) return;
 
-    // Stop any current playback first
-    onlineTTS.current.stop();
-    offlineTTS.current.stop();
+    ttsAdapter.current.stop();
     setError(null);
-    setProgress(null);
+    setWordRange(null);
 
-    const useOnline = isOnline && selectedVoice.provider === 'stream-elements';
-    const adapter   = useOnline ? onlineTTS.current : offlineTTS.current;
-    const useCase   = new SynthesizeSpeechUseCase(adapter);
+    const useCase = new SynthesizeSpeechUseCase(ttsAdapter.current);
 
-    await useCase.execute({ text, voice: selectedVoice, rate, volume }, (state) => {
-      setStatus(state.status);
-      if (state.currentChunk !== undefined && state.totalChunks !== undefined) {
-        setProgress({
-          current: state.currentChunk,
-          total:   state.totalChunks,
-          currentText: state.currentText ?? '',
-        });
+    await useCase.execute(
+      { text, voice: selectedVoice, rate, volume },
+      (state) => {
+        setStatus(state.status);
+        if (state.status === 'idle' || state.status === 'error') setWordRange(null);
+        if (state.error) setError(state.error);
+      },
+      (charIndex, charLength) => {
+        setWordRange({ charIndex, charLength });
       }
-      if (state.status === 'idle' || state.status === 'error') {
-        setProgress(null);
-      }
-      if (state.error) {
-        setError(state.error);
-        // Online TTS failed — retry with offline fallback
-        if (useOnline) {
-          const fallbackUseCase = new SynthesizeSpeechUseCase(offlineTTS.current);
-          fallbackUseCase.execute({ text, voice: selectedVoice, rate, volume }, (s) => {
-            setStatus(s.status);
-            if (s.error) setError(s.error);
-            if (s.status === 'idle') setProgress(null);
-          });
-        }
-      }
-    });
-  }, [selectedVoice, isOnline, rate, volume]);
+    );
+  }, [selectedVoice, rate, volume]);
 
   const pause = useCallback(() => {
-    onlineTTS.current.pause();
-    offlineTTS.current.pause();
+    ttsAdapter.current.pause();
     setStatus('paused');
   }, []);
 
   const resume = useCallback(() => {
-    onlineTTS.current.resume();
-    offlineTTS.current.resume();
+    ttsAdapter.current.resume();
     setStatus('playing');
   }, []);
 
   const stop = useCallback(() => {
-    onlineTTS.current.stop();
-    offlineTTS.current.stop();
+    ttsAdapter.current.stop();
     setStatus('idle');
-    setProgress(null);
+    setWordRange(null);
     setError(null);
   }, []);
 
   return {
     isOnline,
+    hasCloudVoices,
     voices,
     selectedVoice,
     setSelectedVoice,
     status,
-    progress,
+    wordRange,
     error,
     rate,
     setRate,

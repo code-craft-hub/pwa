@@ -2,9 +2,17 @@ import type { Voice } from '../../domain/entities/voice.entity';
 import type { VoiceCatalogPort } from '../../domain/ports/voice-catalog.port';
 
 /**
- * Loads voices from the browser's built-in Web Speech API.
- * Voices with localService === false are cloud-based (Chrome/Edge load them
- * from Google or Microsoft servers when the device is online).
+ * Loads all voices from the browser's Web Speech API.
+ *
+ * Cloud voices (localService = false):
+ *  - Chrome/Edge automatically download Google / Microsoft neural voices from
+ *    their servers when the device is online. These are the same engines that
+ *    power Google Cloud TTS and Azure Cognitive Services — entirely free.
+ *  - They appear in the list as e.g. "Google US English", "Microsoft Aria Online",
+ *    "Google UK English Female", etc.
+ *
+ * Local voices (localService = true):
+ *  - OS-installed voices, always available offline.
  */
 export class WebSpeechVoiceCatalogAdapter implements VoiceCatalogPort {
   getVoices(): Promise<Voice[]> {
@@ -15,34 +23,35 @@ export class WebSpeechVoiceCatalogAdapter implements VoiceCatalogPort {
     return new Promise((resolve) => {
       const synth = window.speechSynthesis;
 
-      const mapVoices = (rawVoices: SpeechSynthesisVoice[]): Voice[] =>
-        rawVoices.map((v) => ({
-          id: v.voiceURI,
-          name: v.name,
-          language: v.lang,
+      const map = (raw: SpeechSynthesisVoice[]): Voice[] =>
+        raw.map((v) => ({
+          id:           v.voiceURI,
+          name:         v.name,
+          language:     v.lang,
           languageCode: v.lang,
-          gender: 'neutral' as const,
+          // Web Speech API doesn't expose gender — default to neutral
+          gender:   'neutral' as const,
           provider: 'web-speech' as const,
-          isLocal: v.localService,
+          isLocal:  v.localService,
         }));
 
       const voices = synth.getVoices();
       if (voices.length > 0) {
-        resolve(mapVoices(voices));
+        resolve(map(voices));
         return;
       }
 
-      // Browsers fire this event when the voice list is ready
+      // Chrome fires 'voiceschanged' asynchronously on first load
       const onVoicesChanged = () => {
-        resolve(mapVoices(synth.getVoices()));
+        resolve(map(synth.getVoices()));
         synth.removeEventListener('voiceschanged', onVoicesChanged);
       };
       synth.addEventListener('voiceschanged', onVoicesChanged);
 
-      // Safety timeout: resolve with empty array if voices never load
+      // Safety timeout: resolve with whatever is available after 3 s
       setTimeout(() => {
         synth.removeEventListener('voiceschanged', onVoicesChanged);
-        resolve(mapVoices(synth.getVoices()));
+        resolve(map(synth.getVoices()));
       }, 3000);
     });
   }

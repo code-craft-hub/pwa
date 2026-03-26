@@ -8,21 +8,20 @@ interface Props {
   selected: Voice | null;
   onChange: (voice: Voice) => void;
   isOnline: boolean;
+  hasCloudVoices: boolean;
 }
 
-export function VoiceSelector({ voices, selected, onChange, isOnline }: Props) {
+export function VoiceSelector({ voices, selected, onChange, isOnline, hasCloudVoices }: Props) {
   const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return voices.filter(
-      (v) =>
-        v.name.toLowerCase().includes(q) ||
-        v.language.toLowerCase().includes(q)
+      (v) => v.name.toLowerCase().includes(q) || v.language.toLowerCase().includes(q)
     );
   }, [voices, search]);
 
-  // Group by language for nicer display
+  // Group by language for nicer optgroup display
   const grouped = useMemo(() => {
     const map = new Map<string, Voice[]>();
     for (const v of filtered) {
@@ -35,9 +34,9 @@ export function VoiceSelector({ voices, selected, onChange, isOnline }: Props) {
 
   if (voices.length === 0) {
     return (
-      <div className="text-white/60 text-sm py-2">
+      <p className="text-sm text-muted-foreground py-1">
         {isOnline ? 'Loading voices…' : 'No local voices found on this device.'}
-      </div>
+      </p>
     );
   }
 
@@ -48,11 +47,11 @@ export function VoiceSelector({ voices, selected, onChange, isOnline }: Props) {
         type="text"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search voices or languages…"
-        className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-2 text-white placeholder-white/40 text-sm focus:outline-none focus:ring-2 focus:ring-white/40"
+        placeholder="Search by name or language…"
+        className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
       />
 
-      {/* Dropdown */}
+      {/* Select */}
       <div className="relative">
         <select
           value={selected?.id ?? ''}
@@ -60,44 +59,43 @@ export function VoiceSelector({ voices, selected, onChange, isOnline }: Props) {
             const voice = voices.find((v) => v.id === e.target.value);
             if (voice) onChange(voice);
           }}
-          className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:ring-2 focus:ring-white/40 appearance-none cursor-pointer"
-          style={{ colorScheme: 'dark' }}
+          className="w-full bg-background border border-border rounded-lg px-3 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer"
+          style={{ colorScheme: 'light dark' }}
         >
           {Array.from(grouped.entries()).map(([lang, langVoices]) => (
-            <optgroup key={lang} label={lang} style={{ background: '#1e1b4b', color: 'white' }}>
+            <optgroup key={lang} label={lang}>
               {langVoices.map((v) => (
-                <option key={v.id} value={v.id} style={{ background: '#1e1b4b', color: 'white' }}>
-                  {v.name} {v.gender !== 'neutral' ? `(${v.gender})` : ''}
+                <option key={v.id} value={v.id}>
+                  {v.name}{!v.isLocal ? ' ✨' : ''}
                 </option>
               ))}
             </optgroup>
           ))}
         </select>
-        {/* Custom chevron */}
-        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-white/60 text-xs">
-          ▼
-        </span>
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">▼</span>
       </div>
 
-      {/* Selected voice badge */}
+      {/* Selected voice badges */}
       {selected && (
-        <div className="flex flex-wrap gap-2 text-xs">
-          <span className="bg-white/10 border border-white/20 rounded-full px-3 py-1 text-white/80">
+        <div className="flex flex-wrap gap-1.5 text-xs">
+          <span className="bg-secondary text-secondary-foreground border border-border rounded-full px-2.5 py-1">
             {selected.language}
           </span>
-          <span className="bg-white/10 border border-white/20 rounded-full px-3 py-1 text-white/80 capitalize">
-            {selected.gender}
-          </span>
-          <span
-            className={`rounded-full px-3 py-1 text-xs font-semibold ${
-              selected.isLocal
-                ? 'bg-yellow-500/20 text-yellow-200 border border-yellow-400/30'
-                : 'bg-green-500/20 text-green-200 border border-green-400/30'
-            }`}
-          >
-            {selected.isLocal ? '📶 Browser voice' : '✨ Cloud voice'}
+          <span className={`rounded-full px-2.5 py-1 border font-medium ${
+            selected.isLocal
+              ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800'
+              : 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800'
+          }`}>
+            {selected.isLocal ? 'Browser voice' : '✨ Cloud voice'}
           </span>
         </div>
+      )}
+
+      {/* Cloud voices note */}
+      {isOnline && hasCloudVoices && (
+        <p className="text-xs text-muted-foreground">
+          ✨ = Google / Microsoft neural voices loaded by your browser.
+        </p>
       )}
     </div>
   );

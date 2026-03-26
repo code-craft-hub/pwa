@@ -3,11 +3,6 @@ import Link from "next/link";
 export default function Home() {
   return (
     <main className="min-h-screen bg-linear-to-br from-blue-500 via-purple-500 to-pink-500 flex items-center justify-center p-4">
-      <Link href="/tts">
-        <button className="w-full bg-linear-to-r from-purple-500 to-indigo-500 hover:from-purple-600 hover:to-indigo-600 text-white font-bold py-4 px-8 rounded-xl transition transform hover:scale-105 text-lg">
-          🔊 Text to Speech Reader
-        </button>
-      </Link>
       <div className="max-w-2xl w-full">
         {/* Card */}
         <div className="bg-white/10 backdrop-blur-md rounded-3xl p-2 sm:p-6 shadow-2xl border border-white/30 text-center">
@@ -76,18 +71,11 @@ export default function Home() {
             </p>
             <div className="flex flex-col gap-2 text-xs text-blue-100">
               <p>
-                📚 <strong>Course:</strong> CIS 435 - Mobile Application
-                Development
+                📚 <strong>Course:</strong> CIS 435 - Mobile Application Development
               </p>
-              <p>
-                👤 <strong>Student:</strong> Kachi (400L)
-              </p>
-              <p>
-                👤 <strong>Lecturer:</strong> Mrs. Chinwe
-              </p>
-              <p>
-                🏫 <strong>Institution:</strong> COOU
-              </p>
+              <p>👤 <strong>Student:</strong> Kachi (400L)</p>
+              <p>👤 <strong>Lecturer:</strong> Mrs. Chinwe</p>
+              <p>🏫 <strong>Institution:</strong> COOU</p>
             </div>
           </div>
         </div>

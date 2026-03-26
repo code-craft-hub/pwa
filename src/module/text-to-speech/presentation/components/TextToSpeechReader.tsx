@@ -1,167 +1,277 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useTTS } from '../hooks/use-tts';
 import { VoiceSelector } from './VoiceSelector';
 import { SpeechControls } from './SpeechControls';
 
-const SAMPLE_TEXTS = [
-  'The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.',
-  'To be or not to be, that is the question. Whether tis nobler in the mind to suffer the slings and arrows of outrageous fortune.',
-  'In the beginning was the Word, and the Word was with God, and the Word was God.',
+// ── Text tokeniser ────────────────────────────────────────────────────────────
+
+interface Token {
+  id: number;
+  type: 'word' | 'space' | 'newline';
+  text: string;
+  /** Start position of this token in the original string */
+  charIndex: number;
+}
+
+function tokenize(text: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0, id = 0;
+
+  while (i < text.length) {
+    if (text[i] === '\n') {
+      tokens.push({ id: id++, type: 'newline', text: '\n', charIndex: i });
+      i++;
+    } else if (/[ \t\r]/.test(text[i])) {
+      let j = i;
+      while (j < text.length && /[ \t\r]/.test(text[j])) j++;
+      tokens.push({ id: id++, type: 'space', text: text.slice(i, j), charIndex: i });
+      i = j;
+    } else {
+      let j = i;
+      while (j < text.length && !/\s/.test(text[j])) j++;
+      tokens.push({ id: id++, type: 'word', text: text.slice(i, j), charIndex: i });
+      i = j;
+    }
+  }
+
+  return tokens;
+}
+
+// ── Sample texts ─────────────────────────────────────────────────────────────
+
+const SAMPLES = [
+  `The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump!`,
+  `To be, or not to be — that is the question: whether 'tis nobler in the mind to suffer the slings and arrows of outrageous fortune, or to take arms against a sea of troubles, and by opposing end them.`,
+  `In the beginning God created the heavens and the earth. Now the earth was formless and empty, darkness was over the surface of the deep, and the Spirit of God was hovering over the waters.`,
 ];
 
+// ── Component ─────────────────────────────────────────────────────────────────
+
 export function TextToSpeechReader() {
-  const [text, setText] = useState('');
-  const [sampleIndex, setSampleIndex] = useState(0);
+  const [text, setText]           = useState('');
+  const [mode, setMode]           = useState<'edit' | 'read'>('edit');
+  const [sampleIdx, setSampleIdx] = useState(0);
 
   const {
-    isOnline,
-    voices,
-    selectedVoice,
-    setSelectedVoice,
-    status,
-    progress,
-    error,
-    rate,
-    setRate,
-    volume,
-    setVolume,
-    speak,
-    pause,
-    resume,
-    stop,
+    isOnline, hasCloudVoices,
+    voices, selectedVoice, setSelectedVoice,
+    status, wordRange, error,
+    rate, setRate, volume, setVolume,
+    speak, pause, resume, stop,
   } = useTTS();
 
-  const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
-  const charCount = text.length;
+  const tokens = useMemo(() => tokenize(text), [text]);
+
+  const wordCount = useMemo(
+    () => tokens.filter((t) => t.type === 'word').length,
+    [tokens]
+  );
+
+  const isHighlighted = useCallback(
+    (token: Token): boolean => {
+      if (!wordRange || token.type !== 'word') return false;
+      const { charIndex: ci } = wordRange;
+      return token.charIndex <= ci && ci < token.charIndex + token.text.length;
+    },
+    [wordRange]
+  );
 
   const handlePlay = () => {
-    if (text.trim()) speak(text);
+    if (!text.trim()) return;
+    setMode('read');
+    speak(text);
+  };
+
+  const handleEdit = () => {
+    stop();
+    setMode('edit');
   };
 
   const loadSample = () => {
-    setText(SAMPLE_TEXTS[sampleIndex % SAMPLE_TEXTS.length]);
-    setSampleIndex((i) => i + 1);
+    setText(SAMPLES[sampleIdx % SAMPLES.length]);
+    setSampleIdx((i) => i + 1);
+    setMode('edit');
+    stop();
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 flex items-start justify-center p-4 pt-8 pb-16">
-      <div className="w-full max-w-2xl space-y-4">
-        {/* Header */}
-        <div className="text-center space-y-2">
-          <div className="text-5xl">🔊</div>
-          <h1 className="text-3xl font-bold text-white">Text to Speech Reader</h1>
-          <p className="text-indigo-200 text-sm">
-            Paste or type any text below and listen to it read aloud
-          </p>
+    <div className="min-h-screen bg-background text-foreground flex flex-col">
+
+      {/* ── Top bar ──────────────────────────────────────────────────────── */}
+      <header className="border-b border-border px-4 sm:px-6 py-4 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="text-2xl">🔊</span>
+          <div>
+            <h1 className="font-semibold text-base leading-none">Text to Speech</h1>
+            <p className="text-xs text-muted-foreground mt-0.5">Free offline / online reader</p>
+          </div>
         </div>
 
-        {/* Online / Offline status banner */}
-        <div
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-medium ${
-            isOnline
-              ? 'bg-green-500/15 border-green-400/30 text-green-200'
-              : 'bg-yellow-500/15 border-yellow-400/30 text-yellow-200'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400' : 'bg-yellow-400'}`} />
-          {isOnline
-            ? '✨ Online — high-quality cloud voices available'
-            : '📶 Offline — using your browser\'s built-in voices'}
-          <span className="ml-auto text-xs opacity-60">
-            {voices.length} voice{voices.length !== 1 ? 's' : ''} loaded
-          </span>
+        {/* Online/offline badge */}
+        <div className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border ${
+          isOnline && hasCloudVoices
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300'
+            : isOnline
+            ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950 dark:border-blue-800 dark:text-blue-300'
+            : 'bg-amber-50 border-amber-200 text-amber-700 dark:bg-amber-950 dark:border-amber-800 dark:text-amber-300'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${
+            isOnline && hasCloudVoices ? 'bg-emerald-500' : isOnline ? 'bg-blue-500' : 'bg-amber-500'
+          }`} />
+          {isOnline && hasCloudVoices
+            ? `✨ ${voices.filter(v => !v.isLocal).length} cloud voices`
+            : isOnline
+            ? 'Online — loading voices…'
+            : `Offline — ${voices.length} local voice${voices.length !== 1 ? 's' : ''}`}
         </div>
+      </header>
 
-        {/* Main card */}
-        <div className="bg-white/10 backdrop-blur-md rounded-3xl p-5 sm:p-6 border border-white/20 shadow-2xl space-y-5">
+      {/* ── Main content ─────────────────────────────────────────────────── */}
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
 
-          {/* Text input */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-white font-semibold text-sm">Text to read</label>
-              <div className="flex items-center gap-3 text-xs text-white/50">
-                <span>{wordCount} word{wordCount !== 1 ? 's' : ''}</span>
-                <span>{charCount} chars</span>
-                <button
-                  onClick={loadSample}
-                  className="text-indigo-200 hover:text-white underline underline-offset-2 transition-colors"
-                >
-                  Load sample
-                </button>
-                {text && (
-                  <button
-                    onClick={() => { setText(''); stop(); }}
-                    className="text-red-300 hover:text-red-200 underline underline-offset-2 transition-colors"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
+        {/* Left: text panel */}
+        <div className="flex-1 flex flex-col p-4 sm:p-6 gap-3 min-h-0">
+
+          {/* Toolbar */}
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>{wordCount} word{wordCount !== 1 ? 's' : ''}</span>
+              <span>·</span>
+              <span>{text.length} chars</span>
             </div>
-
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Paste or type your text here…"
-              rows={8}
-              className="w-full bg-white/5 border border-white/15 rounded-2xl px-4 py-3 text-white placeholder-white/30 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-white/30 leading-relaxed"
-            />
+            <div className="flex items-center gap-2">
+              {mode === 'read' && (
+                <button
+                  onClick={handleEdit}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-border bg-secondary hover:bg-accent text-foreground transition-colors"
+                >
+                  ✏ Edit text
+                </button>
+              )}
+              <button
+                onClick={loadSample}
+                className="text-xs px-3 py-1.5 rounded-lg border border-border bg-secondary hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Load sample
+              </button>
+              {text && (
+                <button
+                  onClick={() => { setText(''); handleEdit(); }}
+                  className="text-xs px-3 py-1.5 rounded-lg border border-border bg-secondary hover:bg-red-50 dark:hover:bg-red-950 text-muted-foreground hover:text-red-600 dark:hover:text-red-400 transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Divider */}
-          <div className="border-t border-white/10" />
+          {/* Text area (edit) or reading view */}
+          <div className="flex-1 rounded-xl border border-border overflow-hidden relative min-h-75 lg:min-h-0">
+
+            {/* Edit mode */}
+            {mode === 'edit' && (
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Paste or type your text here, then press Play to start reading…"
+                className="w-full h-full min-h-75 lg:min-h-full bg-background text-foreground placeholder-muted-foreground px-5 py-4 text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-inset focus:ring-ring"
+              />
+            )}
+
+            {/* Read mode — formatted text with word highlighting */}
+            {mode === 'read' && (
+              <div className="w-full h-full overflow-y-auto px-5 py-4 text-sm sm:text-base leading-8 text-foreground select-text">
+                {tokens.length === 0 ? (
+                  <span className="text-muted-foreground italic">No text to display.</span>
+                ) : (
+                  tokens.map((token) => {
+                    if (token.type === 'newline') return <br key={token.id} />;
+                    if (token.type === 'space')   return <span key={token.id}>{token.text}</span>;
+
+                    const lit = isHighlighted(token);
+                    return (
+                      <span
+                        key={token.id}
+                        className={
+                          lit
+                            ? 'bg-amber-300 text-amber-900 rounded px-0.5 -mx-0.5 transition-colors duration-75'
+                            : 'transition-colors duration-75'
+                        }
+                      >
+                        {token.text}
+                      </span>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* Loading progress bar */}
+            {status === 'loading' && (
+              <div className="absolute inset-x-0 bottom-0 h-0.5 bg-border overflow-hidden">
+                <div className="h-full bg-primary" style={{ width: '40%', animation: 'shimmer 1.2s infinite' }} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: controls panel */}
+        <aside className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-border p-4 sm:p-6 flex flex-col gap-5">
 
           {/* Voice selector */}
-          <div className="space-y-2">
-            <h2 className="text-white font-semibold text-sm">
-              {isOnline ? '✨ Cloud Voices' : '🖥️ Browser Voices'}
-            </h2>
+          <section>
+            <h2 className="text-sm font-semibold mb-2 text-foreground">Voice</h2>
             <VoiceSelector
               voices={voices}
               selected={selectedVoice}
               onChange={setSelectedVoice}
               isOnline={isOnline}
+              hasCloudVoices={hasCloudVoices}
             />
-          </div>
+          </section>
 
-          {/* Divider */}
-          <div className="border-t border-white/10" />
+          <div className="border-t border-border" />
 
-          {/* Controls */}
-          <SpeechControls
-            status={status}
-            progress={progress}
-            rate={rate}
-            setRate={setRate}
-            volume={volume}
-            setVolume={setVolume}
-            onPlay={handlePlay}
-            onPause={pause}
-            onResume={resume}
-            onStop={stop}
-            disabled={!text.trim() || !selectedVoice}
-          />
+          {/* Playback controls */}
+          <section>
+            <h2 className="text-sm font-semibold mb-3 text-foreground">Playback</h2>
+            <SpeechControls
+              status={status}
+              rate={rate} setRate={setRate}
+              volume={volume} setVolume={setVolume}
+              onPlay={handlePlay}
+              onPause={pause}
+              onResume={resume}
+              onStop={stop}
+              disabled={!text.trim() || !selectedVoice}
+            />
+          </section>
 
-          {/* Error message */}
+          {/* Error */}
           {error && (
-            <div className="flex items-start gap-2 bg-red-500/15 border border-red-400/30 rounded-xl px-4 py-3 text-red-200 text-sm">
-              <span className="shrink-0">⚠️</span>
+            <div className="flex items-start gap-2 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950 px-3 py-2.5 text-sm text-red-700 dark:text-red-300">
+              <span className="shrink-0 mt-0.5">⚠</span>
               <span>{error}</span>
             </div>
           )}
-        </div>
 
-        {/* Help text */}
-        <div className="text-center text-indigo-200/60 text-xs space-y-1 px-4">
-          <p>
-            When <strong className="text-indigo-200">online</strong>, premium AWS Polly voices are streamed via a proxy endpoint.
-            When <strong className="text-indigo-200">offline</strong>, your browser&apos;s local voices are used automatically.
-          </p>
-          <p>Chrome &amp; Edge users get Google / Microsoft cloud voices when connected — no setup required.</p>
-        </div>
+          {/* Browser hint shown when online but no cloud voices available */}
+          {isOnline && !hasCloudVoices && voices.length > 0 && (
+            <div className="rounded-lg border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+              <strong className="text-foreground">Tip:</strong> Use Chrome or Microsoft Edge for premium Google / Microsoft neural voices — available automatically when online, no setup needed.
+            </div>
+          )}
+        </aside>
       </div>
+
+      <style>{`
+        @keyframes shimmer {
+          0%   { transform: translateX(-100%); }
+          100% { transform: translateX(350%); }
+        }
+      `}</style>
     </div>
   );
 }
