@@ -196,7 +196,7 @@ export function TextToSpeechReader() {
                         key={token.id}
                         className={
                           lit
-                            ? 'bg-amber-300 text-amber-900 rounded px-0.5 -mx-0.5 transition-colors duration-75'
+                            ? 'bg-yellow-400 text-black rounded px-0.5 -mx-0.5 transition-colors duration-75'
                             : 'transition-colors duration-75'
                         }
                       >
