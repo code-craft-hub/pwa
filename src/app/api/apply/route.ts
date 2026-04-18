@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { jobApplications, jobPosts } from "@/schema/schema"
-import { createAutoApplySession, runBotSession } from "@/lib/auto-apply"
+import { createAutoApplySession, runBotSession, releaseStaleSessionsForUser } from "@/lib/auto-apply"
 import type { UserProfile } from "@/lib/auto-apply"
 import { eq } from "drizzle-orm"
 
@@ -39,6 +39,9 @@ export async function POST(req: NextRequest) {
       .returning()
     applicationId = app.id
   }
+
+  // Release any stale Browserbase sessions before starting a new one
+  await releaseStaleSessionsForUser(userId)
 
   // Init Stagehand + Browserbase session — returns live URL immediately
   const { liveUrl, stagehand } = await createAutoApplySession(applicationId, applyUrl, userProfile)
