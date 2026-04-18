@@ -1,15 +1,79 @@
 /**
- * Service Worker — Quote Notifications
+ * Service Worker — PWA caching + Firebase Cloud Messaging background handler
  *
- * Responsibilities:
- *   1. Receive push events from the server (web-push / VAPID)
- *   2. Display system notifications
- *   3. Handle notification click → focus/open the app
- *   4. Cache-first strategy for static assets (optional PWA offline support)
+ * Boot order:
+ *   1. importScripts('/api/firebase-sw-config') → sets self.FIREBASE_CONFIG
+ *   2. If config has apiKey, import Firebase compat libs and init messaging
+ *   3. Register caching, push, and notificationclick handlers
  */
 
-const CACHE_NAME = "quote-pwa-v1";
+const CACHE_NAME = "waki-pwa-v2";
 const STATIC_ASSETS = ["/", "/manifest.webmanifest"];
+
+// ─── Firebase FCM (loaded only when project is configured) ────────────────────
+let _fcmReady = false;
+
+try {
+  importScripts("/api/firebase-sw-config");
+
+  if (self.FIREBASE_CONFIG && self.FIREBASE_CONFIG.apiKey) {
+    importScripts(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"
+    );
+    importScripts(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js"
+    );
+
+    firebase.initializeApp(self.FIREBASE_CONFIG);
+    const messaging = firebase.messaging();
+
+    /**
+     * onBackgroundMessage — fires when a DATA-only or notification message
+     * arrives while the app tab is closed / in background.
+     * For notification messages while the app is in FOREGROUND, the client
+     * SDK's onMessage() handler in useFCM.ts takes over.
+     */
+    messaging.onBackgroundMessage((payload) => {
+      const { notification, data, fcmOptions } = payload;
+
+      const title =
+        notification?.title ?? data?.title ?? "New Message";
+      const body =
+        notification?.body ?? data?.body ?? "";
+      const imageUrl = notification?.imageUrl ?? data?.imageUrl;
+
+      const options = {
+        body,
+        icon:
+          notification?.icon ??
+          data?.icon ??
+          "/manifest-icon-192.maskable.png",
+        badge: "/favicon-196.png",
+        image: imageUrl,
+        tag: data?.tag ?? payload.collapseKey ?? `fcm-${Date.now()}`,
+        renotify: true,
+        vibrate: [200, 100, 200],
+        requireInteraction: data?.requireInteraction === "true",
+        silent: data?.silent === "true",
+        data: {
+          url: fcmOptions?.link ?? data?.clickAction ?? data?.url ?? "/",
+          ...data,
+        },
+        actions: [
+          { action: "open", title: "Open" },
+          { action: "dismiss", title: "Dismiss" },
+        ],
+      };
+
+      return self.registration.showNotification(title, options);
+    });
+
+    _fcmReady = true;
+    console.log("[SW] Firebase Cloud Messaging initialized");
+  }
+} catch (err) {
+  console.warn("[SW] FCM initialization skipped:", err?.message ?? err);
+}
 
 // ─── Install ──────────────────────────────────────────────────────────────────
 self.addEventListener("install", (event) => {
@@ -17,7 +81,7 @@ self.addEventListener("install", (event) => {
     caches
       .open(CACHE_NAME)
       .then((cache) => cache.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting()) // activate immediately
+      .then(() => self.skipWaiting())
   );
 });
 
@@ -28,33 +92,34 @@ self.addEventListener("activate", (event) => {
       .keys()
       .then((keys) =>
         Promise.all(
-          keys
-            .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key))
+          keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
         )
       )
-      .then(() => self.clients.claim()) // take control of all open tabs
+      .then(() => self.clients.claim())
   );
 });
 
-// ─── Fetch (cache-first for static, network for API) ──────────────────────────
+// ─── Fetch (cache-first for static, network-first for API) ───────────────────
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Let API routes always go to the network
+  // Always bypass cache for API routes
   if (url.pathname.startsWith("/api/")) return;
 
   event.respondWith(
-    caches.match(event.request).then(
-      (cached) => cached ?? fetch(event.request)
-    )
+    caches
+      .match(event.request)
+      .then((cached) => cached ?? fetch(event.request))
   );
 });
 
-// ─── Push ──────────────────────────────────────────────────────────────────────
+// ─── Legacy VAPID push (fallback when FCM is not configured) ─────────────────
 self.addEventListener("push", (event) => {
-  let payload;
+  // When FCM is active it intercepts push events via onBackgroundMessage above.
+  // This handler only fires for raw VAPID pushes (non-FCM path).
+  if (_fcmReady) return;
 
+  let payload;
   try {
     payload = event.data?.json();
   } catch {
@@ -65,34 +130,32 @@ self.addEventListener("push", (event) => {
   }
 
   const {
-    title = "Quote of the Day",
-    body = "Tap to read today's quote.",
+    title = "Notification",
+    body = "Tap to open.",
     icon = "/manifest-icon-192.maskable.png",
     badge = "/favicon-196.png",
-    tag = "quote-of-the-day",
+    tag = `push-${Date.now()}`,
     data = {},
   } = payload;
 
-  const options = {
-    body,
-    icon,
-    badge,
-    tag,                  // collapses duplicate notifications
-    renotify: true,       // vibrate even if same tag
-    vibrate: [200, 100, 200],
-    requireInteraction: false,
-    silent: false,
-    data,
-    actions: [
-      { action: "open", title: "Read more" },
-      { action: "dismiss", title: "Dismiss" },
-    ],
-  };
-
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body,
+      icon,
+      badge,
+      tag,
+      renotify: true,
+      vibrate: [200, 100, 200],
+      data,
+      actions: [
+        { action: "open", title: "Open" },
+        { action: "dismiss", title: "Dismiss" },
+      ],
+    })
+  );
 });
 
-// ─── Notification click ────────────────────────────────────────────────────────
+// ─── Notification click ───────────────────────────────────────────────────────
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
 
@@ -103,22 +166,20 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(
     self.clients
       .matchAll({ type: "window", includeUncontrolled: true })
-      .then((clientList) => {
-        // Focus existing tab if already open
-        for (const client of clientList) {
-          if (client.url.includes(self.location.origin) && "focus" in client) {
-            return client.focus();
-          }
-        }
-        // Otherwise open a new tab
+      .then((clients) => {
+        const existing = clients.find((c) =>
+          c.url.includes(self.location.origin)
+        );
+        if (existing && "focus" in existing) return existing.focus();
         return self.clients.openWindow(targetUrl);
       })
   );
 });
 
-// ─── Push subscription change ─────────────────────────────────────────────────
+// ─── Push subscription change (VAPID token rotation) ─────────────────────────
 self.addEventListener("pushsubscriptionchange", (event) => {
-  // Re-subscribe and send new subscription to server
+  if (_fcmReady) return; // FCM handles its own token rotation
+
   event.waitUntil(
     self.registration.pushManager
       .subscribe({ userVisibleOnly: true })
@@ -130,4 +191,15 @@ self.addEventListener("pushsubscriptionchange", (event) => {
         })
       )
   );
+});
+
+// ─── Client message bus ───────────────────────────────────────────────────────
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+
+  if (event.data?.type === "FCM_STATUS_REQUEST") {
+    event.ports?.[0]?.postMessage({ fcmReady: _fcmReady });
+  }
 });
