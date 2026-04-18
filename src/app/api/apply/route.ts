@@ -40,14 +40,14 @@ export async function POST(req: NextRequest) {
     applicationId = app.id
   }
 
-  // Release any stale Browserbase sessions before starting a new one
+  // Stop any stale Browser-Use sessions before starting a new one
   await releaseStaleSessionsForUser(userId)
 
-  // Init Stagehand + Browserbase session — returns live URL immediately
-  const { liveUrl, stagehand } = await createAutoApplySession(applicationId, applyUrl, userProfile)
+  // Start Browser-Use task — returns live URL immediately
+  const { buSessionId, liveUrl } = await createAutoApplySession(applicationId, applyUrl, userProfile)
 
-  // Fire-and-forget bot loop (stagehand already init'd, passed through)
-  runBotSession(applicationId, applyUrl, userProfile, userId, job.title ?? "Job", stagehand).catch(console.error)
+  // Fire-and-forget bot loop
+  runBotSession(applicationId, userId, job.title ?? "Job", buSessionId).catch(console.error)
 
   return NextResponse.json({ applicationId, liveUrl })
 }

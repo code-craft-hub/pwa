@@ -1,54 +1,87 @@
-import { Stagehand } from "@browserbasehq/stagehand";
 import { db } from "./db";
 import { autoApplySessions } from "@/schema/auto-apply";
 import { jobApplications } from "@/schema/schema";
 import { eq, inArray } from "drizzle-orm";
 
-const BB_API = "https://api.browserbase.com/v1";
-const BB_KEY = () => process.env.BROWSERBASE_API_KEY!;
+const BU_API = "https://api.browser-use.com/api/v3";
+const BU_KEY = () => process.env.BROWSER_USE_API_KEY!;
+const BU_MODEL = process.env.BROWSER_USE_MODEL ?? "gemini-3-flash";
 
-// ---------- Browserbase session cleanup ----------
+// ---------- Browser-Use REST helpers ----------
 
-/** Release a single Browserbase session via REST (fire-and-forget safe). */
-async function releaseBBSession(bbSessionId: string) {
-  await fetch(`${BB_API}/sessions/${bbSessionId}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", "x-bb-api-key": BB_KEY() },
-    body: JSON.stringify({ status: "REQUEST_RELEASE" }),
-  }).catch(() => {});
+interface BuSession {
+  id: string;
+  status: "created" | "running" | "idle" | "stopped" | "error" | "timed_out";
+  output: string | null;
+  live_url: string | null;
 }
 
-/**
- * Release ALL running Browserbase sessions for this project via the REST API,
- * then mark any matching DB rows as failed.
- * Prevents 429 concurrent-session errors on free-tier accounts.
- */
-async function listRunningSessions(): Promise<{ id: string }[]> {
-  const res = await fetch(
-    `${BB_API}/sessions?status=RUNNING&projectId=${process.env.BROWSERBASE_PROJECT_ID}`,
-    { headers: { "x-bb-api-key": BB_KEY() } },
-  ).catch(() => null);
-  if (!res?.ok) return [];
-  const { sessions } = (await res.json()) as { sessions: { id: string }[] };
-  return sessions ?? [];
+async function buPost(path: string, body: object): Promise<Response> {
+  return fetch(`${BU_API}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Browser-Use-API-Key": BU_KEY(),
+    },
+    body: JSON.stringify(body),
+  });
 }
+
+async function buGet(path: string): Promise<Response> {
+  return fetch(`${BU_API}${path}`, {
+    headers: { "X-Browser-Use-API-Key": BU_KEY() },
+  });
+}
+
+async function startBuTask(task: string, existingSessionId?: string): Promise<BuSession> {
+  const res = await buPost("/sessions", {
+    task,
+    model: BU_MODEL,
+    keep_alive: true,
+    ...(existingSessionId ? { session_id: existingSessionId } : {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => String(res.status));
+    throw new Error(`Browser-Use API error (${res.status}): ${text}`);
+  }
+  return res.json() as Promise<BuSession>;
+}
+
+async function fetchBuSession(sessionId: string): Promise<BuSession> {
+  const res = await buGet(`/sessions/${sessionId}`);
+  return res.json() as Promise<BuSession>;
+}
+
+async function stopBuSession(sessionId: string, strategy: "task" | "session" = "session") {
+  await buPost(`/sessions/${sessionId}/stop`, { strategy }).catch(() => {});
+}
+
+/** Poll until the session leaves running/created state (max 10 min). */
+async function pollUntilDone(sessionId: string, timeoutMs = 600_000): Promise<BuSession> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const data = await fetchBuSession(sessionId);
+    if (data.status !== "running" && data.status !== "created") return data;
+  }
+  return { id: sessionId, status: "timed_out", output: null, live_url: null };
+}
+
+/** Wait up to 15 s for live_url to become available after session creation. */
+async function waitForLiveUrl(sessionId: string): Promise<string | null> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const data = await fetchBuSession(sessionId);
+    if (data.live_url) return data.live_url;
+    if (data.status === "error" || data.status === "stopped") return null;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return null;
+}
+
+// ---------- Stale-session cleanup ----------
 
 export async function releaseStaleSessionsForUser(_userId: string) {
-  // 1. Ask Browserbase for every RUNNING session and release them
-  const running = await listRunningSessions();
-  if (running.length > 0) {
-    await Promise.all(running.map((s) => releaseBBSession(s.id)));
-
-    // Poll until Browserbase confirms all sessions are gone (max 30s)
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const still = await listRunningSessions();
-      if (still.length === 0) break;
-    }
-  }
-
-  // 2. Also mark any stale DB rows as failed
   const stale = await db.query.autoApplySessions
     .findMany({
       where: inArray(autoApplySessions.status, [
@@ -58,18 +91,19 @@ export async function releaseStaleSessionsForUser(_userId: string) {
         "resuming",
       ]),
     })
-    .catch(() => [])
+    .catch(() => []);
 
   if (stale.length > 0) {
     await Promise.all(
-      stale.map((s) =>
-        db
+      stale.map(async (s) => {
+        await stopBuSession(s.bbSessionId, "session");
+        await db
           .update(autoApplySessions)
           .set({ status: "failed", stuckReason: "Superseded by new session", updatedAt: new Date() })
           .where(eq(autoApplySessions.id, s.id))
-          .catch(() => {}),
-      ),
-    )
+          .catch(() => {});
+      }),
+    );
   }
 }
 
@@ -93,9 +127,7 @@ async function getSession(applicationId: string) {
 
 // ---------- Wait for human resume ----------
 
-async function waitForResume(
-  applicationId: string,
-): Promise<"resumed" | "abandoned"> {
+async function waitForResume(applicationId: string): Promise<"resumed" | "abandoned"> {
   for (;;) {
     await new Promise((r) => setTimeout(r, 3000));
     const s = await getSession(applicationId);
@@ -153,9 +185,11 @@ ${profile.linkedinUrl ? `- LinkedIn: ${profile.linkedinUrl}` : ""}
 ${profile.resumeUrl ? `- Resume: ${profile.resumeUrl}` : ""}
 - Work authorized: Yes
 
-Fill in every required field. Submit the application. If you cannot proceed because a CAPTCHA,
-phone/SMS verification, email confirmation, or two-factor authentication is blocking progress,
-stop and do NOT attempt to solve it — the user will handle it manually.
+Fill in every required field. Submit the application.
+If you cannot proceed because a CAPTCHA, phone/SMS verification, email confirmation, or
+two-factor authentication is required, stop immediately and output exactly:
+BLOCKED: <one-line description of what is blocking you>
+Do NOT attempt to solve it yourself.
 `.trim();
 }
 
@@ -163,151 +197,114 @@ function buildResumeTask(): string {
   return "The user has completed the manual verification step. Please continue filling in and submitting the job application from where you stopped.";
 }
 
-// ---------- Stagehand factory ----------
-
-// google/gemini-3-flash-preview is the latest fast Gemini model in Stagehand
-const GEMINI_MODEL = "google/gemini-3-flash-preview"
-const geminiModel = () => ({
-  modelName: GEMINI_MODEL,
-  apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY!,
-})
-
-function makeStagehand(existingSessionId?: string) {
-  return new Stagehand({
-    env: "BROWSERBASE",
-    apiKey: process.env.BROWSERBASE_API_KEY!,
-    projectId: process.env.BROWSERBASE_PROJECT_ID!,
-    ...(existingSessionId ? { browserbaseSessionID: existingSessionId } : {}),
-    keepAlive: true,
-    waitForCaptchaSolves: true,
-    model: geminiModel(),
-    verbose: 0,
-    disablePino: true,
-  });
-}
-
 // ---------- Stuck detection ----------
 
-async function detectStuck(
-  stagehand: InstanceType<typeof Stagehand>,
-): Promise<string | null> {
-  try {
-    const { extraction } = await stagehand.extract(
-      "Is this page blocked by a CAPTCHA, phone verification, SMS code, email confirmation, or two-factor authentication that requires human action? Reply with exactly 'BLOCKED: <reason>' if yes, or 'CLEAR' if no.",
-    );
-    if (extraction.startsWith("BLOCKED:")) {
-      return extraction.replace("BLOCKED:", "").trim();
-    }
-    return null;
-  } catch {
-    return null;
+function detectStuckFromOutput(output: string | null): string | null {
+  if (!output) return null;
+  const match = output.match(/BLOCKED:\s*(.+)/i);
+  if (match) return match[1].trim();
+  const lower = output.toLowerCase();
+  const keywords = ["captcha", "phone verification", "sms code", "two-factor", "2fa", "email confirmation", "manual verification"];
+  for (const kw of keywords) {
+    if (lower.includes(kw)) return output.trim();
   }
+  return null;
 }
 
 // ---------- Main entry points ----------
 
 /**
- * Creates a Browserbase session via Stagehand, stores it, and returns the live URL immediately.
+ * Starts a Browser-Use cloud task, stores the session, and returns the live URL immediately.
  * The caller should fire-and-forget runBotSession() after this.
  */
 export async function createAutoApplySession(
   applicationId: string,
   applyUrl: string,
   profile: UserProfile,
-): Promise<{
-  bbSessionId: string;
-  liveUrl: string;
-  stagehand: InstanceType<typeof Stagehand>;
-}> {
-  const stagehand = makeStagehand();
-  await stagehand.init();
+): Promise<{ buSessionId: string; liveUrl: string }> {
+  const task = buildApplyTask(applyUrl, profile);
+  const session = await startBuTask(task);
 
-  const bbSessionId = stagehand.browserbaseSessionID!;
-  const liveUrl =
-    stagehand.browserbaseDebugURL ??
-    `https://www.browserbase.com/sessions/${bbSessionId}`;
+  // live_url may take a moment to appear
+  const liveUrl = session.live_url ?? (await waitForLiveUrl(session.id)) ?? "";
 
   await db
     .insert(autoApplySessions)
     .values({
       applicationId,
-      bbSessionId,
+      bbSessionId: session.id,
       bbLiveUrl: liveUrl,
       status: "running",
     })
     .onConflictDoUpdate({
       target: autoApplySessions.applicationId,
       set: {
-        bbSessionId,
+        bbSessionId: session.id,
         bbLiveUrl: liveUrl,
         status: "running",
         updatedAt: new Date(),
       },
     });
 
-  return { bbSessionId, liveUrl, stagehand };
+  return { buSessionId: session.id, liveUrl };
 }
 
 /**
- * Runs the bot automation. Fire-and-forget — call without await from the API route.
- * The `stagehand` instance is the one returned by createAutoApplySession (already init'd).
+ * Polls the Browser-Use session until done, handles stuck detection and human-in-the-loop.
+ * Fire-and-forget — call without await from the API route.
  */
 export async function runBotSession(
   applicationId: string,
-  applyUrl: string,
-  profile: UserProfile,
   userId: string,
   jobTitle: string,
-  stagehand: InstanceType<typeof Stagehand>,
+  buSessionId: string,
 ) {
   try {
-    const agent = stagehand.agent({ model: geminiModel() });
-    await agent.execute({
-      instruction: buildApplyTask(applyUrl, profile),
-      maxSteps: 40,
-    });
+    const result = await pollUntilDone(buSessionId);
 
-    // Check if we got stuck (e.g. phone verify that CAPTCHA solver couldn't handle)
-    const stuckReason = await detectStuck(stagehand);
+    if (result.status === "error" || result.status === "timed_out") {
+      await updateSession(applicationId, {
+        status: "failed",
+        stuckReason: result.output ?? result.status,
+      });
+      await stopBuSession(buSessionId, "session");
+      return;
+    }
+
+    const stuckReason = detectStuckFromOutput(result.output);
 
     if (stuckReason) {
-      const session = await getSession(applicationId);
+      const dbSession = await getSession(applicationId);
       await updateSession(applicationId, {
         status: "awaiting_human",
         stuckReason,
-        checkpoint: { url: session?.checkpoint?.url ?? "", step: "stuck" },
+        checkpoint: { url: dbSession?.checkpoint?.url ?? "", step: "stuck" },
       });
       await notifyStuck(userId, applicationId, stuckReason, jobTitle);
 
-      // Keep the Browserbase session alive — user sees it via browserbaseDebugURL
       const outcome = await waitForResume(applicationId);
       if (outcome === "abandoned") {
-        await updateSession(applicationId, {
-          status: "failed",
-          stuckReason: "User abandoned",
-        });
-        await stagehand.close();
+        await updateSession(applicationId, { status: "failed", stuckReason: "User abandoned" });
+        await stopBuSession(buSessionId, "session");
         return;
       }
 
-      // Reconnect to the SAME Browserbase session and continue
-      await stagehand.close();
-      const resumed = makeStagehand(
-        await getSession(applicationId).then((s) => s?.bbSessionId),
-      );
-      await resumed.init();
+      // Send follow-up task to the SAME browser session
       await updateSession(applicationId, { status: "running" });
+      const resumed = await startBuTask(buildResumeTask(), buSessionId);
+      const resumeResult = await pollUntilDone(resumed.id);
 
-      const resumeAgent = resumed.agent({ model: geminiModel() });
-      await resumeAgent.execute({
-        instruction: buildResumeTask(),
-        maxSteps: 30,
-      });
-      await resumed.close();
-    } else {
-      await stagehand.close();
+      if (resumeResult.status !== "idle") {
+        await updateSession(applicationId, {
+          status: "failed",
+          stuckReason: resumeResult.output ?? resumeResult.status,
+        });
+        await stopBuSession(buSessionId, "session");
+        return;
+      }
     }
 
+    await stopBuSession(buSessionId, "session");
     await updateSession(applicationId, { status: "completed" });
     await db
       .update(jobApplications)
@@ -315,10 +312,7 @@ export async function runBotSession(
       .where(eq(jobApplications.id, applicationId));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    await updateSession(applicationId, {
-      status: "failed",
-      stuckReason: msg,
-    }).catch(() => {});
-    await stagehand.close().catch(() => {});
+    await updateSession(applicationId, { status: "failed", stuckReason: msg }).catch(() => {});
+    await stopBuSession(buSessionId, "session").catch(() => {});
   }
 }
