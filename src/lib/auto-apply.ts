@@ -44,9 +44,7 @@ async function startBuTask(task: string, existingSessionId?: string): Promise<Bu
     const text = await res.text().catch(() => String(res.status));
     throw new Error(`Browser-Use API error (${res.status}): ${text}`);
   }
-  const json = await res.json();
-  console.log("[BU] POST /sessions response:", JSON.stringify(json, null, 2));
-  return json as BuSession;
+  return res.json() as Promise<BuSession>;
 }
 
 async function fetchBuSession(sessionId: string): Promise<BuSession> {
@@ -66,7 +64,12 @@ async function pollUntilDone(sessionId: string, timeoutMs = 600_000): Promise<Bu
     const data = await fetchBuSession(sessionId);
     if (data.status !== "running" && data.status !== "created") return data;
   }
-  return { id: sessionId, status: "timed_out", output: null, live_url: null };
+  return { id: sessionId, status: "timed_out", output: null, liveUrl: null };
+}
+
+function toInteractiveLiveUrl(liveUrl: string): string {
+  const sep = liveUrl.includes("?") ? "&" : "?";
+  return `${liveUrl}${sep}ui=true`;
 }
 
 /** Poll until live_url is available (max 60 s), then update the DB row. */
@@ -74,20 +77,17 @@ async function hydrateLiveUrl(sessionId: string, applicationId: string): Promise
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     const data = await fetchBuSession(sessionId);
-    console.log("[BU] hydrateLiveUrl poll:", { status: data.status, live_url: data.liveUrl });
     if (data.liveUrl) {
       await db
         .update(autoApplySessions)
-        .set({ bbLiveUrl: data.liveUrl, updatedAt: new Date() })
+        .set({ bbLiveUrl: toInteractiveLiveUrl(data.liveUrl), updatedAt: new Date() })
         .where(eq(autoApplySessions.applicationId, applicationId))
         .catch(() => {});
-      console.log("[BU] live_url saved to DB:", data.liveUrl);
       return;
     }
     if (data.status === "error" || data.status === "stopped") return;
     await new Promise((r) => setTimeout(r, 2000));
   }
-  console.log("[BU] hydrateLiveUrl timed out — live_url never appeared");
 }
 
 // ---------- Stale-session cleanup ----------
@@ -236,25 +236,27 @@ export async function createAutoApplySession(
   const task = buildApplyTask(applyUrl, profile);
   const session = await startBuTask(task);
 
+  const initialLiveUrl = session.liveUrl ? toInteractiveLiveUrl(session.liveUrl) : "";
+
   await db
     .insert(autoApplySessions)
     .values({
       applicationId,
       bbSessionId: session.id,
-      bbLiveUrl: session.liveUrl ?? "",
+      bbLiveUrl: initialLiveUrl,
       status: "running",
     })
     .onConflictDoUpdate({
       target: autoApplySessions.applicationId,
       set: {
         bbSessionId: session.id,
-        bbLiveUrl: session.liveUrl ?? "",
+        bbLiveUrl: initialLiveUrl,
         status: "running",
         updatedAt: new Date(),
       },
     });
 
-  return { buSessionId: session.id, liveUrl: session.liveUrl ?? "" };
+  return { buSessionId: session.id, liveUrl: initialLiveUrl };
 }
 
 /**
@@ -268,7 +270,6 @@ export async function runBotSession(
   buSessionId: string,
 ) {
   try {
-    // Populate live_url in DB as soon as Browser-Use makes it available
     hydrateLiveUrl(buSessionId, applicationId).catch(() => {});
 
     const result = await pollUntilDone(buSessionId);
@@ -282,23 +283,31 @@ export async function runBotSession(
       return;
     }
 
-    const stuckReason = detectStuckFromOutput(result.output);
+    // Check DB — user may have triggered a manual takeover while the task was still running
+    const dbAfterPoll = await getSession(applicationId);
+    const userTookOver = dbAfterPoll?.status === "resuming";
+
+    const stuckReason = userTookOver ? "User requested manual intervention" : detectStuckFromOutput(result.output);
 
     if (stuckReason) {
-      const dbSession = await getSession(applicationId);
-      await updateSession(applicationId, {
-        status: "awaiting_human",
-        stuckReason,
-        checkpoint: { url: dbSession?.checkpoint?.url ?? "", step: "stuck" },
-      });
-      await notifyStuck(userId, applicationId, stuckReason, jobTitle);
+      if (!userTookOver) {
+        // Bot detected the block itself — notify and wait
+        const dbSession = await getSession(applicationId);
+        await updateSession(applicationId, {
+          status: "awaiting_human",
+          stuckReason,
+          checkpoint: { url: dbSession?.checkpoint?.url ?? "", step: "stuck" },
+        });
+        await notifyStuck(userId, applicationId, stuckReason, jobTitle);
 
-      const outcome = await waitForResume(applicationId);
-      if (outcome === "abandoned") {
-        await updateSession(applicationId, { status: "failed", stuckReason: "User abandoned" });
-        await stopBuSession(buSessionId, "session");
-        return;
+        const outcome = await waitForResume(applicationId);
+        if (outcome === "abandoned") {
+          await updateSession(applicationId, { status: "failed", stuckReason: "User abandoned" });
+          await stopBuSession(buSessionId, "session");
+          return;
+        }
       }
+      // DB is already "resuming" at this point (either from bot flow or user takeover)
 
       // Send follow-up task to the SAME browser session
       await updateSession(applicationId, { status: "running" });
