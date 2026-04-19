@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react"
 import { useInfiniteQuery } from "@tanstack/react-query"
 import { JobCard } from "@/components/JobCard"
-import { BotStatusDrawer } from "@/components/BotStatusDrawer"
+import { QADrawer } from "@/components/BotStatusDrawer"
 
 interface Job {
   id: string
@@ -25,17 +25,21 @@ interface JobsPage {
   nextCursor: string | null
 }
 
-// TODO: replace with real auth session userId
+export interface QAItem { question: string; answer: string }
+
+export interface BotSession {
+  applicationId: string
+  liveUrl: string
+  status: "starting" | "running" | "awaiting_human" | "completed" | "failed"
+  stuckReason?: string
+  lastStepSummary?: string
+  applicationQA?: QAItem[]
+}
+
 const DEMO_USER_ID = "c04e1660-d2d2-42ac-9770-b501e5673e89"
 
-async function fetchJobsPage({
-  pageParam,
-  search,
-  excludeEmail,
-}: {
-  pageParam: string | null
-  search: string
-  excludeEmail: boolean
+async function fetchJobsPage({ pageParam, search, excludeEmail }: {
+  pageParam: string | null; search: string; excludeEmail: boolean
 }): Promise<JobsPage> {
   const params = new URLSearchParams({ limit: "20" })
   if (search) params.set("search", search)
@@ -46,30 +50,59 @@ async function fetchJobsPage({
   return res.json()
 }
 
+function mapApiStatus(s: string): BotSession["status"] {
+  if (s === "awaiting_human") return "awaiting_human"
+  if (s === "completed") return "completed"
+  if (s === "failed" || s === "not_found") return "failed"
+  return "running"
+}
+
+/** Invisible component — subscribes to SSE for one bot session and reports updates upward. */
+function BotPoller({ applicationId, jobId, onUpdate }: {
+  applicationId: string
+  jobId: string
+  onUpdate: (jobId: string, patch: Partial<BotSession>) => void
+}) {
+  const onUpdateRef = useRef(onUpdate)
+  onUpdateRef.current = onUpdate
+
+  useEffect(() => {
+    const es = new EventSource(`/api/apply/${applicationId}`)
+    es.onmessage = (e) => {
+      const data = JSON.parse(e.data)
+      const status = mapApiStatus(data.status)
+      onUpdateRef.current(jobId, {
+        status,
+        liveUrl: data.bbLiveUrl || undefined,
+        stuckReason: data.stuckReason || undefined,
+        lastStepSummary: data.lastStepSummary || undefined,
+        applicationQA: data.applicationQA || undefined,
+      })
+      if (status === "completed" || status === "failed") es.close()
+    }
+    es.onerror = () => es.close()
+    return () => es.close()
+  }, [applicationId, jobId])
+
+  return null
+}
+
 export default function JobsPage() {
   const [search, setSearch] = useState("")
   const [excludeEmail, setExcludeEmail] = useState(false)
   const [debouncedSearch, setDebouncedSearch] = useState("")
-  const [applyingJobId, setApplyingJobId] = useState<string | null>(null)
-  const [activeSession, setActiveSession] = useState<{ applicationId: string; jobTitle: string } | null>(null)
+  const [botSessions, setBotSessions] = useState<Record<string, BotSession>>({})
+  const [qaJobId, setQaJobId] = useState<string | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
-  // Debounce search input
   const handleSearch = (value: string) => {
     setSearch(value)
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => setDebouncedSearch(value), 400)
   }
 
-  const {
-    data,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-    isLoading,
-    refetch,
-  } = useInfiniteQuery({
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading, refetch } = useInfiniteQuery({
     queryKey: ["jobs", debouncedSearch, excludeEmail],
     queryFn: ({ pageParam }) =>
       fetchJobsPage({ pageParam: pageParam as string | null, search: debouncedSearch, excludeEmail }),
@@ -79,7 +112,6 @@ export default function JobsPage() {
 
   const jobs = data?.pages.flatMap((p) => p.items) ?? []
 
-  // IntersectionObserver — load next page when sentinel enters viewport
   useEffect(() => {
     const el = sentinelRef.current
     if (!el) return
@@ -91,8 +123,15 @@ export default function JobsPage() {
     return () => obs.disconnect()
   }, [hasNextPage, isFetchingNextPage, fetchNextPage])
 
+  const patchSession = useCallback((jobId: string, patch: Partial<BotSession>) => {
+    setBotSessions((prev) => prev[jobId] ? { ...prev, [jobId]: { ...prev[jobId], ...patch } } : prev)
+  }, [])
+
   const handleApply = useCallback(async (job: Job) => {
-    setApplyingJobId(job.id)
+    setBotSessions((prev) => ({
+      ...prev,
+      [job.id]: { applicationId: "", liveUrl: "", status: "starting" },
+    }))
     try {
       const res = await fetch("/api/apply", {
         method: "POST",
@@ -101,16 +140,34 @@ export default function JobsPage() {
       })
       const result = await res.json()
       if (!res.ok) throw new Error(result.error ?? "Failed to start bot")
-      setActiveSession({ applicationId: result.applicationId, jobTitle: job.title ?? "Job" })
+      setBotSessions((prev) => ({
+        ...prev,
+        [job.id]: { applicationId: result.applicationId, liveUrl: result.liveUrl, status: "running" },
+      }))
     } catch (err) {
+      setBotSessions((prev) => { const n = { ...prev }; delete n[job.id]; return n })
       alert(err instanceof Error ? err.message : "Failed to start auto-apply")
-    } finally {
-      setApplyingJobId(null)
     }
   }, [])
 
+  const handleResume = useCallback(async (applicationId: string) => {
+    await fetch(`/api/apply/${applicationId}/resume`, { method: "POST" })
+  }, [])
+
+  const activePollers = Object.entries(botSessions).filter(
+    ([, s]) => s.applicationId && s.status !== "completed" && s.status !== "failed" && s.status !== "starting"
+  )
+
+  const qaSession = qaJobId ? botSessions[qaJobId] : null
+  const qaJob = qaJobId ? jobs.find((j) => j.id === qaJobId) : null
+
   return (
     <main className="min-h-screen bg-gray-50">
+      {/* SSE pollers — one per active session */}
+      {activePollers.map(([jobId, s]) => (
+        <BotPoller key={jobId} applicationId={s.applicationId} jobId={jobId} onUpdate={patchSession} />
+      ))}
+
       {/* Sticky header */}
       <div className="sticky top-0 z-10 bg-white border-b border-gray-100 px-4 pt-3.5 pb-3 flex flex-col gap-2.5">
         <div className="flex items-center gap-3">
@@ -118,15 +175,9 @@ export default function JobsPage() {
             <h1 className="text-lg font-bold text-gray-900">Jobs</h1>
             <p className="text-xs text-gray-500">Tap Auto Apply — bot handles the rest</p>
           </div>
-          <button
-            onClick={() => refetch()}
-            className="text-indigo-600 text-sm font-medium shrink-0"
-          >
-            Refresh
-          </button>
+          <button onClick={() => refetch()} className="text-indigo-600 text-sm font-medium shrink-0">Refresh</button>
         </div>
 
-        {/* Search box */}
         <div className="relative">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
             <circle cx="11" cy="11" r="8" /><path strokeLinecap="round" d="M21 21l-4.35-4.35" />
@@ -136,17 +187,14 @@ export default function JobsPage() {
             placeholder="Search job titles…"
             value={search}
             onChange={(e) => handleSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-300"
+            className="w-full pl-9 pr-4 py-2 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-300"
           />
         </div>
 
-        {/* Filter toggle */}
         <button
           onClick={() => setExcludeEmail((v) => !v)}
           className={`flex items-center gap-2 self-start text-xs font-medium px-3 py-1.5 rounded-full border transition-colors ${
-            excludeEmail
-              ? "bg-indigo-600 text-white border-indigo-600"
-              : "bg-white text-gray-600 border-gray-200"
+            excludeEmail ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-600 border-gray-200"
           }`}
         >
           <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -156,7 +204,6 @@ export default function JobsPage() {
         </button>
       </div>
 
-      {/* Job list */}
       {isLoading ? (
         <div className="flex justify-center items-center py-20 gap-3">
           <div className="w-6 h-6 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
@@ -171,31 +218,29 @@ export default function JobsPage() {
               key={job.id}
               job={job}
               onApply={handleApply}
-              applying={applyingJobId === job.id}
+              onResume={handleResume}
+              onViewQA={() => setQaJobId(job.id)}
+              botSession={botSessions[job.id]}
             />
           ))}
-
-          {/* Infinite scroll sentinel */}
           <div ref={sentinelRef} className="h-4" />
-
           {isFetchingNextPage && (
             <div className="flex justify-center py-4 gap-2">
               <div className="w-5 h-5 border-2 border-indigo-300 border-t-indigo-600 rounded-full animate-spin" />
               <span className="text-gray-400 text-sm">Loading more…</span>
             </div>
           )}
-
           {!hasNextPage && jobs.length > 0 && (
             <p className="text-center text-xs text-gray-400 py-4">You&apos;ve seen all jobs</p>
           )}
         </div>
       )}
 
-      {activeSession && (
-        <BotStatusDrawer
-          applicationId={activeSession.applicationId}
-          jobTitle={activeSession.jobTitle}
-          onClose={() => setActiveSession(null)}
+      {qaSession?.applicationQA && qaJob && (
+        <QADrawer
+          jobTitle={qaJob.title ?? "Job"}
+          qa={qaSession.applicationQA}
+          onClose={() => setQaJobId(null)}
         />
       )}
     </main>
