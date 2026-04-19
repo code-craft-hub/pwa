@@ -25,16 +25,7 @@ interface JobsPage {
   nextCursor: string | null
 }
 
-// Hard-coded demo profile — replace with real user profile from your auth/profile system
-const DEMO_PROFILE = {
-  firstName: "Alex",
-  lastName: "Johnson",
-  email: "alex@example.com",
-  phone: "+1 555 000 0000",
-  linkedinUrl: "https://linkedin.com/in/alexjohnson",
-}
-
-// Hard-coded userId — replace with real auth session
+// TODO: replace with real auth session userId
 const DEMO_USER_ID = "c04e1660-d2d2-42ac-9770-b501e5673e89"
 
 async function fetchJobsPage({
@@ -106,7 +97,7 @@ export default function JobsPage() {
       const res = await fetch("/api/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: job.id, userId: DEMO_USER_ID, userProfile: DEMO_PROFILE }),
+        body: JSON.stringify({ jobId: job.id, userId: DEMO_USER_ID }),
       })
       const result = await res.json()
       if (!res.ok) throw new Error(result.error ?? "Failed to start bot")

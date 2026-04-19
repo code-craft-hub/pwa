@@ -1,6 +1,11 @@
 import { pgTable, uuid, text, jsonb, timestamp } from "drizzle-orm/pg-core"
 import { jobApplications } from "./schema"
 
+export interface ApplicationQA {
+  question: string
+  answer: string
+}
+
 export const autoApplySessions = pgTable("auto_apply_sessions", {
   id: uuid().defaultRandom().primaryKey(),
   applicationId: uuid("application_id")
@@ -15,6 +20,8 @@ export const autoApplySessions = pgTable("auto_apply_sessions", {
   status: text("status").notNull().default("initializing"),
   stuckReason: text("stuck_reason"),
   checkpoint: jsonb("checkpoint").$type<{ url: string; step: string }>(),
+  /** Q&A log: every question the bot encountered and the answer it gave/the user gave */
+  applicationQA: jsonb("application_qa").$type<ApplicationQA[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 })

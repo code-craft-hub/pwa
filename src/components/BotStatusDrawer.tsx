@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation"
 type BotStatus = "initializing" | "running" | "awaiting_human" | "resuming" | "completed" | "failed" | "not_found"
 type ViewMode = "drawer" | "fullscreen" | "collapsed"
 
+interface QAItem { question: string; answer: string }
+
 interface BotState {
   status: BotStatus
   stuckReason: string | null
@@ -13,6 +15,7 @@ interface BotState {
   checkpoint: { url: string; step: string } | null
   lastStepSummary: string | null
   screenshotUrl: string | null
+  applicationQA: QAItem[] | null
 }
 
 interface Props {
@@ -29,6 +32,7 @@ export function BotStatusDrawer({ applicationId, jobTitle, onClose }: Props) {
     checkpoint: null,
     lastStepSummary: null,
     screenshotUrl: null,
+    applicationQA: null,
   })
   const [resuming, setResuming] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>("drawer")
@@ -243,12 +247,25 @@ export function BotStatusDrawer({ applicationId, jobTitle, onClose }: Props) {
 
         {/* Completed */}
         {state.status === "completed" && (
-          <div className="mx-4 mt-3 bg-green-900/30 border border-green-700 rounded-2xl p-4 text-center">
-            <div className="text-3xl mb-1">🎉</div>
-            <p className="font-semibold text-green-400">Application submitted!</p>
-            {state.screenshotUrl && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={state.screenshotUrl} alt="Final state" className="mt-3 rounded-xl w-full object-contain max-h-40" />
+          <div className="mx-4 mt-3 flex flex-col gap-3">
+            <div className="bg-green-900/30 border border-green-700 rounded-2xl p-4 text-center">
+              <div className="text-3xl mb-1">🎉</div>
+              <p className="font-semibold text-green-400">Application submitted!</p>
+              {state.screenshotUrl && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={state.screenshotUrl} alt="Final state" className="mt-3 rounded-xl w-full object-contain max-h-40" />
+              )}
+            </div>
+            {state.applicationQA && state.applicationQA.length > 0 && (
+              <div className="bg-gray-900 border border-gray-700 rounded-2xl p-4 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Questions &amp; Answers</p>
+                {state.applicationQA.map((item, i) => (
+                  <div key={i} className="border-t border-gray-800 pt-2 first:border-0 first:pt-0">
+                    <p className="text-xs text-gray-400">{item.question}</p>
+                    <p className="text-xs text-white mt-0.5">{item.answer}</p>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}

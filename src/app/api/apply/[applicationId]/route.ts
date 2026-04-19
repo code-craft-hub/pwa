@@ -91,6 +91,7 @@ export async function GET(
           checkpoint: session.checkpoint,
           lastStepSummary,
           screenshotUrl,
+          applicationQA: session.applicationQA ?? null,
           updatedAt: session.updatedAt,
         })
 

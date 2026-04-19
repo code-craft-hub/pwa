@@ -180,35 +180,86 @@ export interface UserProfile {
   lastName: string;
   email: string;
   phone?: string;
+  location?: string;         // "City, Country"
+  currentCompany?: string;
   linkedinUrl?: string;
-  resumeUrl?: string;
+  twitterUrl?: string;
+  githubUrl?: string;
+  portfolioUrl?: string;
+  websiteUrl?: string;
+  resumeUrl?: string;        // publicly accessible download URL
+  resumeText?: string;       // plain-text resume content (fallback for text fields)
+  coverLetterText?: string;  // plain-text cover letter content
+  summary?: string;          // bio / professional summary
+  workAuthorized?: boolean;
+  willingToRelocate?: boolean;
+  salary?: string;
+  availability?: string;     // e.g. "immediately", "2 weeks"
+  yearsOfExperience?: string;
 }
 
 // ---------- Task prompts ----------
 
 function buildApplyTask(applyUrl: string, profile: UserProfile): string {
-  return `
-Go to ${applyUrl} and complete the job application using this profile:
-- Name: ${profile.firstName} ${profile.lastName}
-- Email: ${profile.email}
-${profile.phone ? `- Phone: ${profile.phone}` : ""}
-${profile.linkedinUrl ? `- LinkedIn: ${profile.linkedinUrl}` : ""}
-${profile.resumeUrl ? `- Resume: ${profile.resumeUrl}` : ""}
-- Work authorized: Yes
+  const lines: string[] = [
+    `Go to ${applyUrl} and complete the job application form on behalf of the user.`,
+    ``,
+    `=== CANDIDATE PROFILE ===`,
+    `Full name: ${profile.firstName} ${profile.lastName}`,
+    `Email: ${profile.email}`,
+  ];
 
-Fill in every required field. Submit the application.
-If you cannot proceed because a CAPTCHA, phone/SMS verification, email confirmation, or
-two-factor authentication is required, stop immediately and output exactly:
-BLOCKED: <one-line description of what is blocking you>
-Do NOT attempt to solve it yourself.
-`.trim();
+  if (profile.phone)           lines.push(`Phone: ${profile.phone}`);
+  if (profile.location)        lines.push(`Location: ${profile.location}`);
+  if (profile.currentCompany)  lines.push(`Current company: ${profile.currentCompany}`);
+  if (profile.linkedinUrl)     lines.push(`LinkedIn: ${profile.linkedinUrl}`);
+  if (profile.githubUrl)       lines.push(`GitHub: ${profile.githubUrl}`);
+  if (profile.twitterUrl)      lines.push(`Twitter: ${profile.twitterUrl}`);
+  if (profile.portfolioUrl)    lines.push(`Portfolio: ${profile.portfolioUrl}`);
+  if (profile.websiteUrl)      lines.push(`Website: ${profile.websiteUrl}`);
+  if (profile.resumeUrl)       lines.push(`Resume file URL (upload this file where a resume upload is required): ${profile.resumeUrl}`);
+  if (profile.salary)          lines.push(`Salary expectation: ${profile.salary}`);
+  if (profile.availability)    lines.push(`Availability to start: ${profile.availability}`);
+  if (profile.yearsOfExperience) lines.push(`Years of experience: ${profile.yearsOfExperience}`);
+
+  lines.push(`Work authorized in this country: ${profile.workAuthorized !== false ? "Yes" : "No"}`);
+  lines.push(`Willing to relocate: ${profile.willingToRelocate !== false ? "Yes" : "No"}`);
+
+  if (profile.summary) {
+    lines.push(``, `=== PROFESSIONAL SUMMARY ===`, profile.summary);
+  }
+
+  if (profile.coverLetterText) {
+    lines.push(``, `=== COVER LETTER ===`, profile.coverLetterText);
+    lines.push(`(Use this exact text when a cover letter or motivation letter field is present)`);
+  }
+
+  if (profile.resumeText) {
+    lines.push(``, `=== RESUME CONTENT (use to answer experience/skills questions) ===`, profile.resumeText.slice(0, 3000));
+  }
+
+  lines.push(``, `=== INSTRUCTIONS ===`);
+  lines.push(`1. Fill in EVERY field using the profile data above. Use best judgment for fields not explicitly listed.`);
+  lines.push(`2. For "How did you hear about us?" or similar: answer "Company website" or "Online search".`);
+  lines.push(`3. For open-ended essay questions: write a thoughtful answer using information from the resume and summary.`);
+  lines.push(`4. Upload the resume file when a file upload field is present.`);
+  lines.push(`5. Submit the application when all required fields are filled.`);
+  lines.push(`6. If a CAPTCHA, SMS/phone verification, email confirmation, or two-factor authentication blocks you, stop and output:`);
+  lines.push(`   BLOCKED: <one-line description>`);
+  lines.push(`   Do NOT attempt to solve it yourself.`);
+  lines.push(`7. After submitting (or being blocked), output a structured Q&A log of every question you encountered and the answer you provided, in this exact format:`);
+  lines.push(`   APPLICATION_QA_START`);
+  lines.push(`   [{"question": "...", "answer": "..."}, ...]`);
+  lines.push(`   APPLICATION_QA_END`);
+
+  return lines.join("\n").trim();
 }
 
 function buildResumeTask(): string {
   return "The user has completed the manual verification step. Please continue filling in and submitting the job application from where you stopped.";
 }
 
-// ---------- Stuck detection ----------
+// ---------- Output parsing ----------
 
 function detectStuckFromOutput(output: string | null): string | null {
   if (!output) return null;
@@ -218,6 +269,21 @@ function detectStuckFromOutput(output: string | null): string | null {
   const keywords = ["captcha", "phone verification", "sms code", "two-factor", "2fa", "email confirmation", "manual verification"];
   for (const kw of keywords) {
     if (lower.includes(kw)) return output.trim();
+  }
+  return null;
+}
+
+import type { ApplicationQA } from "@/schema/auto-apply";
+
+function extractQAFromOutput(output: string | null): ApplicationQA[] | null {
+  if (!output) return null;
+  const match = output.match(/APPLICATION_QA_START\s*([\s\S]*?)\s*APPLICATION_QA_END/i);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (Array.isArray(parsed)) return parsed as ApplicationQA[];
+  } catch {
+    // ignore parse errors
   }
   return null;
 }
@@ -322,10 +388,28 @@ export async function runBotSession(
         await stopBuSession(buSessionId, "session");
         return;
       }
+
+      // Use resume output as the final output for Q&A extraction
+      await stopBuSession(buSessionId, "session");
+      const resumeQa = extractQAFromOutput(resumeResult.output);
+      await updateSession(applicationId, {
+        status: "completed",
+        ...(resumeQa ? { applicationQA: resumeQa } : {}),
+      });
+      await db
+        .update(jobApplications)
+        .set({ status: "submitted", autoApplied: true })
+        .where(eq(jobApplications.id, applicationId));
+      return;
     }
 
     await stopBuSession(buSessionId, "session");
-    await updateSession(applicationId, { status: "completed" });
+    const finalOutput = result.status === "idle" ? result.output : null;
+    const qa = extractQAFromOutput(finalOutput);
+    await updateSession(applicationId, {
+      status: "completed",
+      ...(qa ? { applicationQA: qa } : {}),
+    });
     await db
       .update(jobApplications)
       .set({ status: "submitted", autoApplied: true })
