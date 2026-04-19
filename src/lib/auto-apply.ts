@@ -13,7 +13,7 @@ interface BuSession {
   id: string;
   status: "created" | "running" | "idle" | "stopped" | "error" | "timed_out";
   output: string | null;
-  live_url: string | null;
+  liveUrl: string | null;
 }
 
 async function buPost(path: string, body: object): Promise<Response> {
@@ -44,7 +44,9 @@ async function startBuTask(task: string, existingSessionId?: string): Promise<Bu
     const text = await res.text().catch(() => String(res.status));
     throw new Error(`Browser-Use API error (${res.status}): ${text}`);
   }
-  return res.json() as Promise<BuSession>;
+  const json = await res.json();
+  console.log("[BU] POST /sessions response:", JSON.stringify(json, null, 2));
+  return json as BuSession;
 }
 
 async function fetchBuSession(sessionId: string): Promise<BuSession> {
@@ -67,16 +69,25 @@ async function pollUntilDone(sessionId: string, timeoutMs = 600_000): Promise<Bu
   return { id: sessionId, status: "timed_out", output: null, live_url: null };
 }
 
-/** Wait up to 15 s for live_url to become available after session creation. */
-async function waitForLiveUrl(sessionId: string): Promise<string | null> {
-  const deadline = Date.now() + 15_000;
+/** Poll until live_url is available (max 60 s), then update the DB row. */
+async function hydrateLiveUrl(sessionId: string, applicationId: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     const data = await fetchBuSession(sessionId);
-    if (data.live_url) return data.live_url;
-    if (data.status === "error" || data.status === "stopped") return null;
-    await new Promise((r) => setTimeout(r, 1500));
+    console.log("[BU] hydrateLiveUrl poll:", { status: data.status, live_url: data.liveUrl });
+    if (data.liveUrl) {
+      await db
+        .update(autoApplySessions)
+        .set({ bbLiveUrl: data.liveUrl, updatedAt: new Date() })
+        .where(eq(autoApplySessions.applicationId, applicationId))
+        .catch(() => {});
+      console.log("[BU] live_url saved to DB:", data.liveUrl);
+      return;
+    }
+    if (data.status === "error" || data.status === "stopped") return;
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  return null;
+  console.log("[BU] hydrateLiveUrl timed out — live_url never appeared");
 }
 
 // ---------- Stale-session cleanup ----------
@@ -225,28 +236,25 @@ export async function createAutoApplySession(
   const task = buildApplyTask(applyUrl, profile);
   const session = await startBuTask(task);
 
-  // live_url may take a moment to appear
-  const liveUrl = session.live_url ?? (await waitForLiveUrl(session.id)) ?? "";
-
   await db
     .insert(autoApplySessions)
     .values({
       applicationId,
       bbSessionId: session.id,
-      bbLiveUrl: liveUrl,
+      bbLiveUrl: session.liveUrl ?? "",
       status: "running",
     })
     .onConflictDoUpdate({
       target: autoApplySessions.applicationId,
       set: {
         bbSessionId: session.id,
-        bbLiveUrl: liveUrl,
+        bbLiveUrl: session.liveUrl ?? "",
         status: "running",
         updatedAt: new Date(),
       },
     });
 
-  return { buSessionId: session.id, liveUrl };
+  return { buSessionId: session.id, liveUrl: session.liveUrl ?? "" };
 }
 
 /**
@@ -260,6 +268,9 @@ export async function runBotSession(
   buSessionId: string,
 ) {
   try {
+    // Populate live_url in DB as soon as Browser-Use makes it available
+    hydrateLiveUrl(buSessionId, applicationId).catch(() => {});
+
     const result = await pollUntilDone(buSessionId);
 
     if (result.status === "error" || result.status === "timed_out") {
