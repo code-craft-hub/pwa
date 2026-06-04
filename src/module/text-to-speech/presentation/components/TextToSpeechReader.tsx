@@ -142,7 +142,7 @@ export function TextToSpeechReader() {
 
   const loadSample = () => {
     setText(SAMPLES[sampleIdx % SAMPLES.length]);
-    setSampleIdx((i) => i + 1);
+    setSampleIdx((i: number) => i + 1);
     setMode('edit');
     stop();
   };
@@ -229,7 +229,7 @@ export function TextToSpeechReader() {
                 {tokens.length === 0 ? (
                   <span className="text-muted-foreground italic">No text to display.</span>
                 ) : (
-                  tokens.map((token) => {
+                  tokens.map((token:Token) => {
                     if (token.type === 'newline') return <br key={token.id} />;
                     if (token.type === 'space')   return <span key={token.id}>{token.text}</span>;
 
