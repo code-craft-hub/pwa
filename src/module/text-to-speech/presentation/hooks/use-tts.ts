@@ -15,8 +15,6 @@ export interface WordRange {
 
 export interface UseTTSReturn {
   isOnline: boolean;
-  /** true when the browser has cloud voices available (Chrome / Edge) */
-  hasCloudVoices: boolean;
   voices: Voice[];
   selectedVoice: Voice | null;
   setSelectedVoice: (voice: Voice) => void;
@@ -81,16 +79,14 @@ export function useTTS(): UseTTSReturn {
     return () => { cancelled = true; };
   }, [isOnline]);
 
-  // Stop and clear word highlight when going offline mid-read
+  // Stop playback if we go offline and the selected voice requires the network
   useEffect(() => {
-    if (!isOnline && (status === 'playing' || status === 'loading')) {
+    if (!isOnline && !selectedVoice?.isLocal && (status === 'playing' || status === 'loading')) {
       ttsAdapter.current.stop();
       setStatus('idle');
       setWordRange(null);
     }
-  }, [isOnline, status]);
-
-  const hasCloudVoices = voices.some((v) => !v.isLocal);
+  }, [isOnline, selectedVoice, status]);
 
   // ── Speak ─────────────────────────────────────────────────────────────
   const speak = useCallback(async (text: string) => {
@@ -134,7 +130,6 @@ export function useTTS(): UseTTSReturn {
 
   return {
     isOnline,
-    hasCloudVoices,
     voices,
     selectedVoice,
     setSelectedVoice,

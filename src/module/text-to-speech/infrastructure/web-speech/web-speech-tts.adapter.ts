@@ -5,14 +5,12 @@ import type { TTSPort } from '../../domain/ports/tts.port';
 /**
  * TTS adapter using the browser's built-in Web Speech API.
  *
- * Word-boundary events:
- *  - Chrome / Edge fire `boundary` with name === 'word', providing charIndex and
- *    charLength — used for live word highlighting.
- *  - Firefox / Safari have limited boundary-event support; highlighting degrades
- *    gracefully (no highlight instead of error).
+ * Long texts are split into ~300-char chunks so Chrome reliably fires onstart
+ * (Chrome silently refuses to process very large single utterances).
  */
 export class WebSpeechTTSAdapter implements TTSPort {
   private utterance: SpeechSynthesisUtterance | null = null;
+  private stopped = false;
 
   speak(
     request: SpeechRequest,
@@ -25,70 +23,78 @@ export class WebSpeechTTSAdapter implements TTSPort {
     }
 
     this.stop();
+    this.stopped = false;
 
-    return new Promise((resolve) => {
-      const synth     = window.speechSynthesis;
-      const utterance = new SpeechSynthesisUtterance(request.text);
-      this.utterance  = utterance;
+    const chunks = WebSpeechTTSAdapter.splitIntoChunks(request.text);
+    const synth  = window.speechSynthesis;
 
-      // ── Voice resolution ──────────────────────────────────────────────
-      const matched = synth.getVoices().find((v) => v.voiceURI === request.voice.id);
-      if (matched) utterance.voice = matched;
-
-      utterance.rate   = Math.max(0.1, Math.min(10, request.rate));
-      utterance.volume = Math.max(0, Math.min(1, request.volume));
-      utterance.pitch  = 1;
-
-      // ── Lifecycle events ──────────────────────────────────────────────
-      utterance.onstart = () =>
-        onStateChange({ status: 'playing', currentChunk: 1, totalChunks: 1 });
-
-      utterance.onend = () => {
-        onStateChange({ status: 'idle' });
-        resolve();
-      };
-
-      utterance.onerror = (e) => {
-        // 'interrupted' / 'canceled' are expected when stop() is called
-        if (e.error === 'interrupted' || e.error === 'canceled') {
-          onStateChange({ status: 'idle' });
-        } else {
-          onStateChange({ status: 'error', error: `Speech error: ${e.error}` });
+    return new Promise<void>((resolve) => {
+      const speakChunk = (idx: number): void => {
+        if (this.stopped || idx >= chunks.length) {
+          if (!this.stopped) onStateChange({ status: 'idle' });
+          resolve();
+          return;
         }
-        resolve();
-      };
 
-      // ── Word boundary (Chrome/Edge only) ──────────────────────────────
-      if (onWordBoundary) {
-        utterance.onboundary = (e) => {
-          if (e.name !== 'word') return;
-          // charLength is part of the spec but typed as optional in some TS versions
-          const charLen: number =
-            (e as SpeechSynthesisEvent & { charLength?: number }).charLength ??
-            WebSpeechTTSAdapter.estimateWordLength(request.text, e.charIndex);
-          onWordBoundary(e.charIndex, charLen);
-        };
-      }
+        const { text: chunkText, start: chunkStart } = chunks[idx];
+        const utterance = new SpeechSynthesisUtterance(chunkText);
+        this.utterance  = utterance;
 
-      onStateChange({ status: 'loading', currentChunk: 1, totalChunks: 1 });
-      synth.speak(utterance);
+        const matched = synth.getVoices().find((v) => v.voiceURI === request.voice.id);
+        if (matched) utterance.voice = matched;
+        utterance.rate   = Math.max(0.1, Math.min(10, request.rate));
+        utterance.volume = Math.max(0, Math.min(1, request.volume));
+        utterance.pitch  = 1;
 
-      // Chrome has a bug where speech pauses after ~15 s on long texts;
-      // periodically resuming the synth keeps it going.
-      const keepAlive = setInterval(() => {
-        if (synth.speaking && !synth.paused) {
-          synth.pause();
-          synth.resume();
-        } else {
+        let keepAlive: ReturnType<typeof setInterval>;
+
+        utterance.onstart = () =>
+          onStateChange({ status: 'playing', currentChunk: idx + 1, totalChunks: chunks.length });
+
+        utterance.onend = () => {
           clearInterval(keepAlive);
-        }
-      }, 10_000);
+          speakChunk(idx + 1);
+        };
 
-      const origOnEnd = utterance.onend;
-      utterance.onend = (e) => {
-        clearInterval(keepAlive);
-        origOnEnd?.call(utterance, e);
+        utterance.onerror = (e) => {
+          clearInterval(keepAlive);
+          if (e.error === 'interrupted' || e.error === 'canceled') {
+            onStateChange({ status: 'idle' });
+          } else {
+            onStateChange({ status: 'error', error: `Speech error: ${e.error}` });
+          }
+          resolve();
+        };
+
+        if (onWordBoundary) {
+          utterance.onboundary = (e) => {
+            if (e.name !== 'word') return;
+            const charLen: number =
+              (e as SpeechSynthesisEvent & { charLength?: number }).charLength ??
+              WebSpeechTTSAdapter.estimateWordLength(chunkText, e.charIndex);
+            onWordBoundary(chunkStart + e.charIndex, charLen);
+          };
+        }
+
+        // Only show loading spinner while waiting for the very first chunk to start
+        if (idx === 0) {
+          onStateChange({ status: 'loading', currentChunk: 1, totalChunks: chunks.length });
+        }
+
+        synth.speak(utterance);
+
+        // Chrome pauses silently after ~15 s; keep it alive by cycling pause/resume
+        keepAlive = setInterval(() => {
+          if (synth.speaking && !synth.paused) {
+            synth.pause();
+            synth.resume();
+          } else {
+            clearInterval(keepAlive);
+          }
+        }, 10_000);
       };
+
+      speakChunk(0);
     });
   }
 
@@ -101,19 +107,63 @@ export class WebSpeechTTSAdapter implements TTSPort {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.utterance) {
-      this.utterance.onend    = null;
-      this.utterance.onerror  = null;
+      this.utterance.onstart    = null;
+      this.utterance.onend      = null;
+      this.utterance.onerror    = null;
       this.utterance.onboundary = null;
       this.utterance = null;
     }
     window.speechSynthesis?.cancel();
   }
 
-  /** Estimate word length by scanning to the next whitespace or punctuation. */
+  /**
+   * Splits text into chunks ≤ maxLen chars, preferring sentence boundaries then
+   * word boundaries so the speech engine never receives an oversized utterance.
+   * Returns each chunk with its start offset in the original string for correct
+   * word-highlight charIndex mapping.
+   */
+  private static splitIntoChunks(
+    text: string,
+    maxLen = 300
+  ): Array<{ text: string; start: number }> {
+    if (text.length <= maxLen) return [{ text, start: 0 }];
+
+    const chunks: Array<{ text: string; start: number }> = [];
+    let i = 0;
+
+    while (i < text.length) {
+      // skip leading whitespace
+      while (i < text.length && /\s/.test(text[i])) i++;
+      if (i >= text.length) break;
+
+      const start = i;
+      let end = Math.min(i + maxLen, text.length);
+
+      if (end < text.length) {
+        // prefer a sentence boundary (.!?\n) near end
+        let j = end;
+        while (j > start && !/[.!?\n]/.test(text[j - 1])) j--;
+        if (j > start) {
+          end = j;
+        } else {
+          // fall back to last whitespace
+          j = end;
+          while (j > start && !/\s/.test(text[j])) j--;
+          if (j > start) end = j;
+        }
+      }
+
+      chunks.push({ text: text.slice(start, end), start });
+      i = end;
+    }
+
+    return chunks;
+  }
+
   private static estimateWordLength(text: string, charIndex: number): number {
-    const slice = text.slice(charIndex);
-    const match = slice.match(/^[^\s]*/);
+    const match = text.slice(charIndex).match(/^[^\s]*/);
     return match ? match[0].length : 0;
   }
 }

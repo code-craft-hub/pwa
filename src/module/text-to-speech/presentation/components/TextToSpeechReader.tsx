@@ -55,7 +55,7 @@ export function TextToSpeechReader() {
   const [sampleIdx, setSampleIdx] = useState(0);
 
   const {
-    isOnline, hasCloudVoices,
+    isOnline,
     voices, selectedVoice, setSelectedVoice,
     status, wordRange, error,
     rate, setRate, volume, setVolume,
@@ -111,20 +111,12 @@ export function TextToSpeechReader() {
 
         {/* Online/offline badge */}
         <div className={`flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-full border ${
-          isOnline && hasCloudVoices
-            ? 'bg-emerald-50 border-emerald-200 text-emerald-700 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-300'
-            : isOnline
+          isOnline
             ? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-950 dark:border-blue-800 dark:text-blue-300'
             : 'bg-amber-50 border-amber-200 text-amber-700 dark:bg-amber-950 dark:border-amber-800 dark:text-amber-300'
         }`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${
-            isOnline && hasCloudVoices ? 'bg-emerald-500' : isOnline ? 'bg-blue-500' : 'bg-amber-500'
-          }`} />
-          {isOnline && hasCloudVoices
-            ? `✨ ${voices.filter(v => !v.isLocal).length} cloud voices`
-            : isOnline
-            ? 'Online — loading voices…'
-            : `Offline — ${voices.length} local voice${voices.length !== 1 ? 's' : ''}`}
+          <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-blue-500' : 'bg-amber-500'}`} />
+          {isOnline ? 'Online' : `Offline — ${voices.length} local voice${voices.length !== 1 ? 's' : ''}`}
         </div>
       </header>
 
@@ -228,7 +220,6 @@ export function TextToSpeechReader() {
               selected={selectedVoice}
               onChange={setSelectedVoice}
               isOnline={isOnline}
-              hasCloudVoices={hasCloudVoices}
             />
           </section>
 
@@ -257,12 +248,6 @@ export function TextToSpeechReader() {
             </div>
           )}
 
-          {/* Browser hint shown when online but no cloud voices available */}
-          {isOnline && !hasCloudVoices && voices.length > 0 && (
-            <div className="rounded-lg border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-              <strong className="text-foreground">Tip:</strong> Use Chrome or Microsoft Edge for premium Google / Microsoft neural voices — available automatically when online, no setup needed.
-            </div>
-          )}
         </aside>
       </div>
 
