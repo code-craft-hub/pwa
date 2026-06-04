@@ -39,6 +39,53 @@ function tokenize(text: string): Token[] {
   return tokens;
 }
 
+// ── Markdown stripper ────────────────────────────────────────────────────────
+// Converts markdown-formatted text to plain text so the TTS engine reads words,
+// not symbols. Processed in order: structural elements first, inline last.
+
+function stripMarkdown(md: string): string {
+  return md
+    // fenced code blocks → keep inner content only
+    .replace(/^```[^\n]*$/gm, '')
+    // inline code → keep content
+    .replace(/`([^`]+)`/g, '$1')
+    // images → alt text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // links → link text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    // ATX headers (# Heading)
+    .replace(/^#{1,6}[ \t]+/gm, '')
+    // setext header underlines (===== or -----)
+    .replace(/^[=\-]{2,}[ \t]*$/gm, '')
+    // blockquotes
+    .replace(/^>[ \t]*/gm, '')
+    // horizontal rules (--- / *** / ___)
+    .replace(/^[ \t]*[-*_][ \t]*[-*_][ \t]*[-*_][- \t*_]*$/gm, '')
+    // unordered list markers (- / * / +)
+    .replace(/^[ \t]*[-*+][ \t]+/gm, '')
+    // ordered list markers (1. / 2) etc.)
+    .replace(/^[ \t]*\d+[.)]\s+/gm, '')
+    // HTML tags
+    .replace(/<[^>]+>/g, '')
+    // strikethrough
+    .replace(/~~([^~\n]+)~~/g, '$1')
+    // bold + italic ***text***
+    .replace(/\*{3}([^*\n]+)\*{3}/g, '$1')
+    // bold **text** or __text__
+    .replace(/\*{2}([^*\n]+)\*{2}/g, '$1')
+    .replace(/_{2}([^_\n]+)_{2}/g, '$1')
+    // italic *text* or _text_  (single-line only to avoid list-marker collisions)
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/_([^_\n]+)_/g, '$1')
+    // table pipes
+    .replace(/\|/g, ' ')
+    // escaped markdown characters → literal character
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|])/g, '$1')
+    // collapse extra blank lines
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 // ── Sample texts ─────────────────────────────────────────────────────────────
 
 const SAMPLES = [
@@ -51,6 +98,7 @@ const SAMPLES = [
 
 export function TextToSpeechReader() {
   const [text, setText]           = useState('');
+  const [readText, setReadText]   = useState('');
   const [mode, setMode]           = useState<'edit' | 'read'>('edit');
   const [sampleIdx, setSampleIdx] = useState(0);
 
@@ -62,11 +110,12 @@ export function TextToSpeechReader() {
     speak, pause, resume, stop,
   } = useTTS();
 
-  const tokens = useMemo(() => tokenize(text), [text]);
+  // Read mode uses stripped text so TTS char indices align with displayed tokens
+  const tokens = useMemo(() => tokenize(readText), [readText]);
 
   const wordCount = useMemo(
-    () => tokens.filter((t) => t.type === 'word').length,
-    [tokens]
+    () => text.trim() ? text.trim().split(/\s+/).length : 0,
+    [text]
   );
 
   const isHighlighted = useCallback(
@@ -80,8 +129,10 @@ export function TextToSpeechReader() {
 
   const handlePlay = () => {
     if (!text.trim()) return;
+    const plain = stripMarkdown(text);
+    setReadText(plain);
     setMode('read');
-    speak(text);
+    speak(plain);
   };
 
   const handleEdit = () => {
