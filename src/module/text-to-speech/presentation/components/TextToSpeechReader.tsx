@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useTTS } from '../hooks/use-tts';
 import { VoiceSelector } from './VoiceSelector';
 import { SpeechControls } from './SpeechControls';
@@ -118,6 +118,18 @@ export function TextToSpeechReader() {
     [text]
   );
 
+  // Ref to the currently highlighted word span — used for auto-scroll
+  const highlightRef = useRef<HTMLSpanElement | null>(null);
+
+  // Scroll the highlighted word into view whenever it changes
+  useEffect(() => {
+    highlightRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'nearest',
+    });
+  }, [wordRange]);
+
   const isHighlighted = useCallback(
     (token: Token): boolean => {
       if (!wordRange || token.type !== 'word') return false;
@@ -229,7 +241,7 @@ export function TextToSpeechReader() {
                 {tokens.length === 0 ? (
                   <span className="text-muted-foreground italic">No text to display.</span>
                 ) : (
-                  tokens.map((token:Token) => {
+                  tokens.map((token: Token) => {
                     if (token.type === 'newline') return <br key={token.id} />;
                     if (token.type === 'space')   return <span key={token.id}>{token.text}</span>;
 
@@ -237,11 +249,8 @@ export function TextToSpeechReader() {
                     return (
                       <span
                         key={token.id}
-                        className={
-                          lit
-                            ? 'bg-yellow-400 text-black rounded px-0.5 -mx-0.5 transition-colors duration-75'
-                            : 'transition-colors duration-75'
-                        }
+                        ref={lit ? highlightRef : undefined}
+                        className={lit ? 'tts-word' : undefined}
                       >
                         {token.text}
                       </span>
@@ -306,6 +315,32 @@ export function TextToSpeechReader() {
         @keyframes shimmer {
           0%   { transform: translateX(-100%); }
           100% { transform: translateX(350%); }
+        }
+
+        /* ── Word highlight ─────────────────────────────────────────────── */
+        .tts-word {
+          display: inline-block;
+          vertical-align: baseline;
+          background-color: #fde047;   /* yellow-300 */
+          color: #111827;              /* gray-900 — high contrast */
+          border-radius: 4px;
+          padding: 0 5px;
+          margin: 0 -5px;
+          font-weight: 700;
+          animation: tts-pop 0.25s ease-out;
+        }
+
+        /* Slightly more vivid yellow on dark backgrounds */
+        @media (prefers-color-scheme: dark) {
+          .tts-word { background-color: #facc15; } /* yellow-400 */
+        }
+        .dark .tts-word { background-color: #facc15; }
+
+        /* Pop-in: word scales up from nothing, snaps to normal size */
+        @keyframes tts-pop {
+          0%   { transform: scale(0.85); opacity: 0.6; }
+          60%  { transform: scale(1.08); opacity: 1;   }
+          100% { transform: scale(1);    opacity: 1;   }
         }
       `}</style>
     </div>
