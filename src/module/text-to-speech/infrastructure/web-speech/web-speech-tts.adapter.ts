@@ -44,7 +44,10 @@ export class WebSpeechTTSAdapter implements TTSPort {
     this.stop();
     this.stopped = false;
 
-    const chunks = WebSpeechTTSAdapter.splitIntoChunks(request.text);
+    // Android's TTS engine dies silently when pause()/resume() is called on it,
+    // so we use smaller chunks and skip the keepAlive entirely on Android.
+    const isAndroid = /Android/i.test(navigator.userAgent ?? '');
+    const chunks = WebSpeechTTSAdapter.splitIntoChunks(request.text, isAndroid ? 120 : 300);
     const synth  = window.speechSynthesis;
 
     return new Promise<void>((resolve) => {
@@ -74,7 +77,9 @@ export class WebSpeechTTSAdapter implements TTSPort {
         let lastMark    = -1;     // last timeline index fired by the timer
 
         let keepAlive: ReturnType<typeof setInterval>;
+        let watchdog:  ReturnType<typeof setTimeout> | null = null;
 
+        const clearWatchdog = () => { if (watchdog) { clearTimeout(watchdog); watchdog = null; } };
         const clearWordTimer = () => {
           if (this.wordTimer) { clearInterval(this.wordTimer); this.wordTimer = null; }
         };
@@ -128,12 +133,14 @@ export class WebSpeechTTSAdapter implements TTSPort {
         // ── onend / onerror ────────────────────────────────────────────────
         utterance.onend = () => {
           clearInterval(keepAlive);
+          clearWatchdog();
           clearWordTimer();
           speakChunk(idx + 1);
         };
 
         utterance.onerror = (e) => {
           clearInterval(keepAlive);
+          clearWatchdog();
           clearWordTimer();
           if (e.error === 'interrupted' || e.error === 'canceled') {
             onStateChange({ status: 'idle' });
@@ -150,15 +157,30 @@ export class WebSpeechTTSAdapter implements TTSPort {
 
         synth.speak(utterance);
 
-        // Chrome pauses silently after ~15 s; cycling pause/resume keeps it alive
-        keepAlive = setInterval(() => {
-          if (synth.speaking && !synth.paused) {
-            synth.pause();
-            synth.resume();
-          } else {
-            clearInterval(keepAlive);
-          }
-        }, 10_000);
+        if (isAndroid) {
+          // Android: do NOT use pause/resume keepAlive — it kills the TTS silently.
+          // Instead, set a watchdog that auto-advances if onend never arrives
+          // (silent death). Allow 2× the estimated speaking time + 4 s grace.
+          const estimatedMs = (chunkText.length / (13 * Math.max(0.1, request.rate))) * 1000;
+          watchdog = setTimeout(() => {
+            watchdog = null;
+            if (!this.stopped) {
+              clearWordTimer();
+              speakChunk(idx + 1);
+            }
+          }, estimatedMs * 2 + 4000);
+        } else {
+          // Desktop Chrome: keep speech alive by cycling pause/resume every 10 s
+          // (Chrome pauses silently after ~15 s on long utterances).
+          keepAlive = setInterval(() => {
+            if (synth.speaking && !synth.paused) {
+              synth.pause();
+              synth.resume();
+            } else {
+              clearInterval(keepAlive);
+            }
+          }, 10_000);
+        }
       };
 
       speakChunk(0);
@@ -170,8 +192,7 @@ export class WebSpeechTTSAdapter implements TTSPort {
 
   stop(): void {
     this.stopped = true;
-    clearInterval(this.wordTimer as ReturnType<typeof setInterval>);
-    this.wordTimer = null;
+    if (this.wordTimer) { clearInterval(this.wordTimer); this.wordTimer = null; }
     if (this.utterance) {
       this.utterance.onstart    = null;
       this.utterance.onend      = null;
