@@ -11,16 +11,20 @@ interface WordMark {
 /**
  * TTS adapter using the browser's built-in Web Speech API.
  *
- * Word highlighting strategy:
- *  - If the voice fires native `onboundary` word events (local voices, Microsoft
- *    cloud voices in Edge) those are used directly — most accurate.
- *  - If the first boundary never fires (Google cloud voices), a timer-based
- *    fallback kicks in automatically. It estimates each word's start time from
- *    character counts, speech rate and punctuation pauses. The timer resets at
- *    every chunk boundary so drift never accumulates beyond one chunk (~10 s).
+ * Word highlighting strategy
+ * ──────────────────────────
+ * 1. Native onboundary  – fires for local OS voices and Microsoft cloud voices
+ *    (Edge).  Used as-is; most accurate.
+ * 2. Timer fallback     – for Google cloud voices that never fire onboundary.
+ *    On onstart, a 50 ms interval walks a pre-built per-word timeline derived
+ *    from character counts, speech rate and punctuation pauses.  The moment a
+ *    native boundary arrives the timer is cancelled, so both paths coexist
+ *    without conflict.  The timer resets at every chunk boundary so drift never
+ *    accumulates beyond one chunk (~10 s of speech).
  *
- * Long texts are split into ≤300-char chunks so Chrome reliably fires onstart
- * (Chrome silently refuses to process very large single utterances).
+ * All per-chunk state (nativeFired, timerActive, …) is declared at the
+ * speakChunk scope so every handler closure shares the exact same variables —
+ * no handler override tricks needed.
  */
 export class WebSpeechTTSAdapter implements TTSPort {
   private utterance: SpeechSynthesisUtterance | null = null;
@@ -53,66 +57,46 @@ export class WebSpeechTTSAdapter implements TTSPort {
 
         const { text: chunkText, start: chunkStart } = chunks[idx];
         const utterance = new SpeechSynthesisUtterance(chunkText);
-        this.utterance = utterance;
+        this.utterance  = utterance;
 
+        // ── Voice / rate / volume ──────────────────────────────────────────
         const matched = synth.getVoices().find((v) => v.voiceURI === request.voice.id);
         if (matched) utterance.voice = matched;
         utterance.rate   = Math.max(0.1, Math.min(10, request.rate));
         utterance.volume = Math.max(0, Math.min(1, request.volume));
         utterance.pitch  = 1;
 
+        // ── Per-chunk shared state (all handlers close over these) ────────
+        let nativeFired = false;  // true once a real onboundary fires
+        let timerActive = true;   // false while speech is paused
+        let timerStart  = 0;      // wall-clock ms when onstart fired
+        let pausedAt    = 0;      // wall-clock ms when last pause started
+        let lastMark    = -1;     // last timeline index fired by the timer
+
         let keepAlive: ReturnType<typeof setInterval>;
 
-        // ── Word boundary helpers ──────────────────────────────────────────
         const clearWordTimer = () => {
           if (this.wordTimer) { clearInterval(this.wordTimer); this.wordTimer = null; }
         };
 
-        // onstart: begin timer-based fallback; cancelled if native fires
+        // ── onstart: begin timer fallback ──────────────────────────────────
         utterance.onstart = () => {
           onStateChange({ status: 'playing', currentChunk: idx + 1, totalChunks: chunks.length });
 
           if (!onWordBoundary) return;
 
+          timerStart = Date.now();
           clearWordTimer();
-          const timeline  = WebSpeechTTSAdapter.buildWordTimeline(chunkText, request.rate);
-          let startTime   = Date.now();
-          let pauseTime   = 0;
-          let timerActive = true;
-          let lastMark    = -1;
-          let nativeFired = false;
 
-          // Expose pause/resume controls to the utterance handlers below
-          utterance.onpause = () => {
-            timerActive = false;
-            pauseTime   = Date.now();
-          };
-          utterance.onresume = () => {
-            if (pauseTime > 0) startTime += Date.now() - pauseTime;
-            timerActive = true;
-          };
-
-          // Cancel timer the moment a native boundary arrives
-          const cancelTimerOnNative = () => {
-            nativeFired = true;
-            clearWordTimer();
-          };
-
-          // Override the onboundary set below to also stop the timer
-          const prevBoundary = utterance.onboundary as ((e: SpeechSynthesisEvent) => void) | null;
-          utterance.onboundary = (e: SpeechSynthesisEvent) => {
-            if (e.name === 'word') cancelTimerOnNative();
-            prevBoundary?.call(utterance, e);
-          };
+          const timeline = WebSpeechTTSAdapter.buildWordTimeline(chunkText, request.rate);
 
           this.wordTimer = setInterval(() => {
             if (nativeFired || !timerActive) return;
-            const elapsed = Date.now() - startTime;
+            const elapsed = Date.now() - timerStart;
             for (let i = lastMark + 1; i < timeline.length; i++) {
               if (timeline[i].startMs <= elapsed) {
                 lastMark = i;
-                const w = timeline[i];
-                onWordBoundary(chunkStart + w.charIndex, w.charLength);
+                onWordBoundary(chunkStart + timeline[i].charIndex, timeline[i].charLength);
               } else {
                 break;
               }
@@ -120,7 +104,28 @@ export class WebSpeechTTSAdapter implements TTSPort {
           }, 50);
         };
 
-        // ── Lifecycle ──────────────────────────────────────────────────────
+        // ── onboundary: native word events (local / Microsoft voices) ──────
+        utterance.onboundary = (e) => {
+          if (e.name !== 'word') return;
+          // First native event → cancel the timer fallback permanently
+          if (!nativeFired) {
+            nativeFired = true;
+            clearWordTimer();
+          }
+          const charLen: number =
+            (e as SpeechSynthesisEvent & { charLength?: number }).charLength ??
+            WebSpeechTTSAdapter.estimateWordLength(chunkText, e.charIndex);
+          onWordBoundary?.(chunkStart + e.charIndex, charLen);
+        };
+
+        // ── pause / resume: keep timer in sync with speech state ──────────
+        utterance.onpause  = () => { timerActive = false; pausedAt = Date.now(); };
+        utterance.onresume = () => {
+          if (pausedAt > 0) timerStart += Date.now() - pausedAt; // exclude paused time
+          timerActive = true;
+        };
+
+        // ── onend / onerror ────────────────────────────────────────────────
         utterance.onend = () => {
           clearInterval(keepAlive);
           clearWordTimer();
@@ -138,24 +143,14 @@ export class WebSpeechTTSAdapter implements TTSPort {
           resolve();
         };
 
-        // ── Native word boundary (local voices / Edge Microsoft voices) ────
-        if (onWordBoundary) {
-          utterance.onboundary = (e) => {
-            if (e.name !== 'word') return;
-            const charLen: number =
-              (e as SpeechSynthesisEvent & { charLength?: number }).charLength ??
-              WebSpeechTTSAdapter.estimateWordLength(chunkText, e.charIndex);
-            onWordBoundary(chunkStart + e.charIndex, charLen);
-          };
-        }
-
+        // Show loading indicator only while waiting for the very first chunk
         if (idx === 0) {
           onStateChange({ status: 'loading', currentChunk: 1, totalChunks: chunks.length });
         }
 
         synth.speak(utterance);
 
-        // Chrome pauses silently after ~15 s; keep it alive by cycling pause/resume
+        // Chrome pauses silently after ~15 s; cycling pause/resume keeps it alive
         keepAlive = setInterval(() => {
           if (synth.speaking && !synth.paused) {
             synth.pause();
@@ -175,7 +170,8 @@ export class WebSpeechTTSAdapter implements TTSPort {
 
   stop(): void {
     this.stopped = true;
-    if (this.wordTimer) { clearInterval(this.wordTimer); this.wordTimer = null; }
+    clearInterval(this.wordTimer as ReturnType<typeof setInterval>);
+    this.wordTimer = null;
     if (this.utterance) {
       this.utterance.onstart    = null;
       this.utterance.onend      = null;
@@ -188,30 +184,31 @@ export class WebSpeechTTSAdapter implements TTSPort {
     window.speechSynthesis?.cancel();
   }
 
-  // ── Word timeline builder ────────────────────────────────────────────────────
+  // ── Word timeline ────────────────────────────────────────────────────────────
   /**
-   * Estimates the start time (in ms from utterance start) of every word in
-   * `text` at the given speech `rate`.  Used as a fallback when the voice does
-   * not fire native boundary events.
+   * Builds an array of { charIndex, charLength, startMs } for every word in
+   * `text`.  startMs is the estimated time from utterance start at which the
+   * word begins, accounting for character-based speaking speed and punctuation
+   * pauses.
    *
-   * Model (all values divided by `rate`):
-   *  - 13 chars/s  → base speaking speed for English at rate=1
-   *  - 60 ms       → gap between words
-   *  - 350 ms      → pause after sentence-ending punctuation  (. ! ?)
-   *  - 160 ms      → pause after clause-separating punctuation (, ; :)
+   * Constants at rate = 1 (all divided by rate for other speeds):
+   *   13 chars/s  base speaking speed for English
+   *   60 ms       gap between words
+   *   350 ms      pause after sentence-ending punctuation (. ! ?)
+   *   160 ms      pause after clause punctuation (, ; :)
    */
   private static buildWordTimeline(text: string, rate: number): WordMark[] {
-    const msPerChar  = 1000 / (13 * rate);
-    const wordGap    =  60  / rate;
-    const sentPause  = 350  / rate;
-    const clausePause = 160 / rate;
+    const msPerChar   = 1000 / (13 * rate);
+    const wordGap     =   60 / rate;
+    const sentPause   =  350 / rate;
+    const clausePause =  160 / rate;
 
     const marks: WordMark[] = [];
     let t = 0;
     let i = 0;
 
     while (i < text.length) {
-      // Skip whitespace, adding a pause proportional to what came before it
+      // ── Whitespace run → add inter-word pause ────────────────────────────
       if (/\s/.test(text[i])) {
         const prev = i > 0 ? text[i - 1] : '';
         while (i < text.length && /\s/.test(text[i])) i++;
@@ -221,11 +218,10 @@ export class WebSpeechTTSAdapter implements TTSPort {
         continue;
       }
 
-      // Read one word token (non-whitespace run)
+      // ── Non-whitespace run → one word token ─────────────────────────────
       const start = i;
       while (i < text.length && !/\s/.test(text[i])) i++;
       const word = text.slice(start, i);
-
       marks.push({ charIndex: start, charLength: word.length, startMs: t });
       t += word.length * msPerChar;
     }
@@ -251,11 +247,13 @@ export class WebSpeechTTSAdapter implements TTSPort {
       let end = Math.min(i + maxLen, text.length);
 
       if (end < text.length) {
+        // Prefer splitting at a sentence boundary
         let j = end;
         while (j > start && !/[.!?\n]/.test(text[j - 1])) j--;
         if (j > start) {
           end = j;
         } else {
+          // Fall back to last whitespace
           j = end;
           while (j > start && !/\s/.test(text[j])) j--;
           if (j > start) end = j;
